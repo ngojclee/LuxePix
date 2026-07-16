@@ -30,6 +30,30 @@ These package checks used isolated fixtures on the Windows host. A repeat inside
 Windows Sandbox remains documented because Sandbox was not available in this
 session.
 
+## Published Release Verification
+
+- GitHub Actions release run `29512641253` completed successfully in 7m58s and
+  published the non-draft, non-prerelease `v1.1.0` release.
+- The unauthenticated GitHub `releases/latest` endpoint returned `v1.1.0`, and
+  the public `release-manifest.json` download returned version `1.1.0`.
+- All four published assets were downloaded again from GitHub. Their byte
+  lengths and SHA-256 digests matched the GitHub asset metadata,
+  `release-manifest.json`, and `SHA256SUMS.txt`.
+- The published portable ZIP opened a responsive `1.1.0` window in 1,321 ms
+  with the `.portable` marker active.
+- The published installer completed an isolated current-user install with exit
+  code 0, registered version `1.1.0`, opened a responsive window in 684 ms, and
+  uninstalled cleanly with exit code 0.
+- The installer is not code-signed, so Windows may display an unknown-publisher
+  or SmartScreen warning.
+
+Published binary SHA-256:
+
+| Asset | SHA-256 |
+|---|---|
+| `LuxePix-v1.1.0-windows-x64-portable.zip` | `7ccbd37ae36c2f2dd33c7e5974db73e5409864dd33f6a75a1165242d5e29596a` |
+| `LuxePix-v1.1.0-windows-x64-setup.exe` | `c733eeb74ded10e87192132813d7032b5405845833e738930f359737c5e2ae83` |
+
 ## UI Evidence
 
 - [Light explorer](light-explorer.png)

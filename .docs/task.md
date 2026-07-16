@@ -26,7 +26,7 @@
 - [x] Complete updater, installer, and portable packaging.
 - [x] Complete Batch Rename, Duplicate Finder, ZIP, and Folder Size tools.
 - [x] Capture final Windows host acceptance and UI evidence.
-- [ ] Publish the verified `v1.1.0` tag and assets to GitHub Releases.
+- [x] Publish the verified `v1.1.0` tag and assets to GitHub Releases.
 
 ## Documented Follow-Ups
 - [ ] Prove outbound OLE drag from LuxePix into Windows Explorer.

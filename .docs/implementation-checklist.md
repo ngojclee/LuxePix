@@ -265,3 +265,14 @@ This checklist follows:
   72 application tests, and 2 explicit release-only performance tests.
   Remaining feasibility items are documented in E3-E5 and the Windows Sandbox
   repeat remains an environment follow-up.
+- 2026-07-16: GitHub Actions release run `29512641253` completed successfully
+  in 7m58s and published `v1.1.0` from commit `4693899` as a non-draft,
+  non-prerelease GitHub Release.
+- 2026-07-16: Downloaded all four published assets again and verified their
+  exact byte lengths and SHA-256 digests against GitHub asset metadata,
+  `release-manifest.json`, and `SHA256SUMS.txt`. The public latest-release API
+  and manifest download both returned version `1.1.0`.
+- 2026-07-16: The published portable package opened responsively in 1,321 ms.
+  The published installer completed an isolated current-user install, opened
+  responsively in 684 ms, and uninstalled cleanly; all package operations
+  returned exit code 0.
