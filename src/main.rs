@@ -3,8 +3,11 @@
 mod app;
 mod commands;
 mod config;
+mod model;
+mod navigation;
 mod scanner;
 mod storage;
+mod tasks;
 mod thumbs;
 
 use eframe::egui;

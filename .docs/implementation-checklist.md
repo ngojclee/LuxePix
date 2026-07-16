@@ -34,9 +34,9 @@ This checklist follows:
 - [x] Add a unified `CommandId` registry and enabled-state model.
 - [x] Route toolbar, context menu, shortcuts, and action bar through commands.
 - [x] Add shortcut capture, validation, conflict detection, reset, import, and export.
-- [ ] Add path-based stable item IDs.
-- [ ] Add background task/event infrastructure.
-- [ ] Move scans and long operations off the egui frame thread.
+- [x] Add path-based stable item IDs.
+- [x] Add background task/event infrastructure.
+- [x] Move scans and long operations off the egui frame thread.
 - [ ] Split large UI sections out of `src/app.rs`.
 - [ ] Rebuild the approved `design/` shell in reusable egui components.
 - [ ] Add first-run source/cache/index setup.
@@ -51,7 +51,7 @@ This checklist follows:
 - [ ] Add Ctrl toggle, Shift range, Ctrl+A, Escape, and keyboard focus movement.
 - [ ] Add optional selection checkboxes.
 - [ ] Add rectangle selection in grid/gallery.
-- [ ] Add Back, Forward, Up, breadcrumbs, and refresh.
+- [~] Add Back, Forward, Up, breadcrumbs, and refresh.
 - [ ] Restore prior selection and scroll state per folder.
 - [ ] Add Gallery view.
 - [ ] Add Grid view.
@@ -174,3 +174,8 @@ This checklist follows:
   profiles with validation, conflict detection, reset, import, and export.
 - 2026-07-16: E1 core verification passed with format, strict Clippy, 12 unit
   tests, locked release build, and a release executable startup smoke test.
+- 2026-07-16: Replaced index-based folder/file selection with path-based
+  `ItemId`, added browser-style Back/Forward/Up history, and moved root/folder
+  scans onto typed background tasks with stale-result rejection.
+- 2026-07-16: Background-scan verification passed with format, strict Clippy,
+  16 unit tests, locked release build, and an asynchronous startup smoke test.

@@ -57,8 +57,11 @@ impl CommandId {
         Self::Settings,
     ];
 
-    pub const ACTIVE: [Self; 9] = [
+    pub const ACTIVE: [Self; 12] = [
         Self::Settings,
+        Self::Back,
+        Self::Forward,
+        Self::Up,
         Self::Copy,
         Self::Cut,
         Self::Paste,

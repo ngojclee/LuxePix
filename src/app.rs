@@ -5,8 +5,11 @@ use eframe::egui;
 
 use crate::commands::{CommandContext, CommandId};
 use crate::config::{AppConfig, ShortcutConfig};
-use crate::scanner::{self, format_size, FileEntry, FolderEntry};
+use crate::model::{FileEntry, FolderEntry, ItemId};
+use crate::navigation::NavigationHistory;
+use crate::scanner::format_size;
 use crate::storage::{transactional_write, StoragePaths};
+use crate::tasks::{TaskEvent, TaskId, TaskKind, TaskManager};
 use crate::thumbs::ThumbManager;
 
 // ── Preview state ──────────────────────────────────────────────
@@ -21,20 +24,24 @@ struct PreviewState {
 pub struct LuxePixApp {
     path_input: String,
     current_path: Option<PathBuf>,
+    navigation: NavigationHistory,
 
     folders: Vec<FolderEntry>,
-    selected_folder: Option<usize>,
+    selected_folder: Option<ItemId>,
     left_thumb_size: f32,
 
     right_files: Vec<FileEntry>,
     right_image_paths: Vec<PathBuf>,
-    selected_file: Option<usize>,
+    selected_file: Option<ItemId>,
     right_thumb_size: f32,
 
     preview: Option<PreviewState>,
 
     thumb_mgr: ThumbManager,
     full_mgr: ThumbManager,
+    tasks: TaskManager,
+    root_scan_task: Option<TaskId>,
+    folder_scan_task: Option<TaskId>,
 
     // Rename state
     renaming: Option<RenameState>,
@@ -121,6 +128,7 @@ impl LuxePixApp {
         let mut app = Self {
             path_input: String::new(),
             current_path: None,
+            navigation: NavigationHistory::default(),
             folders: Vec::new(),
             selected_folder: None,
             left_thumb_size: config.left_thumb_size,
@@ -131,6 +139,9 @@ impl LuxePixApp {
             preview: None,
             thumb_mgr: ThumbManager::new(3000, 4),
             full_mgr: ThumbManager::new(5, 2),
+            tasks: TaskManager::new(4),
+            root_scan_task: None,
+            folder_scan_task: None,
             renaming: None,
             storage,
             config,
@@ -145,19 +156,11 @@ impl LuxePixApp {
             status: "Ready. Pick a folder above or choose a recent path.".into(),
         };
 
-        // Restore last opened path
         if let Some(ref last) = app.config.last_path.clone() {
             let p = PathBuf::from(last);
             if p.is_dir() {
-                app.path_input = last.clone();
-                app.current_path = Some(p.clone());
-                app.folders = scanner::scan_directory(&p);
-                let total_imgs: usize = app.folders.iter().map(|f| f.image_count).sum();
-                app.status = format!(
-                    "Restored {} folders and {} images from last path.",
-                    app.folders.len(),
-                    total_imgs
-                );
+                app.navigation.restore(p.clone());
+                app.load_path(p, false);
             }
         }
 
@@ -165,50 +168,182 @@ impl LuxePixApp {
     }
 
     fn navigate_to(&mut self, path: PathBuf) {
+        self.navigation.visit(path.clone());
+        self.load_path(path, true);
+    }
+
+    fn load_path(&mut self, path: PathBuf, save_recent: bool) {
         self.current_path = Some(path.clone());
         self.path_input = path.to_string_lossy().to_string();
         self.renaming = None;
         self.show_history = false;
 
-        // Save to history
-        self.config.add_path(&self.path_input);
+        if save_recent {
+            self.config.add_path(&self.path_input);
+        }
 
-        self.folders = scanner::scan_directory(&path);
+        self.root_scan_task = Some(self.tasks.scan_root(&path));
+        self.folder_scan_task = None;
+        self.folders.clear();
         self.selected_folder = None;
         self.right_files.clear();
         self.right_image_paths.clear();
+        self.selected_file = None;
         self.preview = None;
-
-        let total_imgs: usize = self.folders.iter().map(|f| f.image_count).sum();
-        let total_files: usize = self.folders.iter().map(|f| f.total_files).sum();
-        self.status = format!(
-            "Scanned {} folders, {} images and {} files.",
-            self.folders.len(),
-            total_imgs,
-            total_files
-        );
+        self.status = format!("Scanning {}...", path.display());
     }
 
-    fn select_folder(&mut self, idx: usize) {
-        if idx >= self.folders.len() {
+    fn select_folder(&mut self, id: ItemId) {
+        let Some(folder) = self.folders.iter().find(|folder| folder.id == id) else {
             return;
-        }
-        self.selected_folder = Some(idx);
+        };
+        let path = folder.path.clone();
+        let name = folder.name.clone();
+        self.selected_folder = Some(id);
         self.selected_file = None;
-        self.right_files = scanner::list_all_files(&self.folders[idx].path);
-        self.right_image_paths = self
-            .right_files
-            .iter()
-            .filter(|f| f.is_image)
-            .map(|f| f.path.clone())
-            .collect();
-        let img_count = self.right_image_paths.len();
-        let other_count = self.right_files.len() - img_count;
-        self.status = format!(
-            "{}: {} images and {} other files.",
-            self.folders[idx].name, img_count, other_count
-        );
+        self.right_files.clear();
+        self.right_image_paths.clear();
         self.preview = None;
+        self.folder_scan_task = Some(self.tasks.scan_folder(&path));
+        self.status = format!("Loading {}...", name);
+    }
+
+    fn process_task_events(&mut self) {
+        for event in self.tasks.drain(32) {
+            match event {
+                TaskEvent::RootScanned { id, path, folders }
+                    if self.root_scan_task == Some(id)
+                        && self.current_path.as_ref() == Some(&path) =>
+                {
+                    self.root_scan_task = None;
+                    self.folders = folders;
+                    if let Some(selected_id) = self.selected_folder.clone() {
+                        if !self.folders.iter().any(|folder| folder.id == selected_id) {
+                            self.selected_folder = None;
+                            self.selected_file = None;
+                            self.right_files.clear();
+                            self.right_image_paths.clear();
+                        }
+                    }
+
+                    let total_imgs: usize =
+                        self.folders.iter().map(|folder| folder.image_count).sum();
+                    let total_files: usize =
+                        self.folders.iter().map(|folder| folder.total_files).sum();
+                    if self.folder_scan_task.is_none() {
+                        self.status = format!(
+                            "Scanned {} folders, {} images and {} files.",
+                            self.folders.len(),
+                            total_imgs,
+                            total_files
+                        );
+                    }
+                }
+                TaskEvent::FolderScanned { id, path, files }
+                    if self.folder_scan_task == Some(id)
+                        && self
+                            .selected_folder
+                            .as_ref()
+                            .is_some_and(|selected| selected.as_path() == path) =>
+                {
+                    self.folder_scan_task = None;
+                    self.right_files = files;
+                    self.right_image_paths = self
+                        .right_files
+                        .iter()
+                        .filter(|file| file.is_image)
+                        .map(|file| file.path.clone())
+                        .collect();
+                    if let Some(selected_id) = &self.selected_file {
+                        if !self.right_files.iter().any(|file| &file.id == selected_id) {
+                            self.selected_file = None;
+                        }
+                    }
+                    let image_count = self.right_image_paths.len();
+                    let other_count = self.right_files.len().saturating_sub(image_count);
+                    let folder_name = self
+                        .folders
+                        .iter()
+                        .find(|folder| folder.path == path)
+                        .map(|folder| folder.name.as_str())
+                        .unwrap_or("Folder");
+                    self.status = format!(
+                        "{}: {} images and {} other files.",
+                        folder_name, image_count, other_count
+                    );
+                }
+                TaskEvent::Failed {
+                    id,
+                    kind,
+                    path,
+                    error,
+                } => {
+                    let is_current = match kind {
+                        TaskKind::ScanRoot => self.root_scan_task == Some(id),
+                        TaskKind::ScanFolder => self.folder_scan_task == Some(id),
+                    };
+                    if is_current {
+                        match kind {
+                            TaskKind::ScanRoot => self.root_scan_task = None,
+                            TaskKind::ScanFolder => self.folder_scan_task = None,
+                        }
+                        self.status = format!("Could not scan {}: {}", path.display(), error);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn navigate_back(&mut self) {
+        if let Some(path) = self.navigation.back() {
+            self.load_path(path, true);
+        }
+    }
+
+    fn navigate_forward(&mut self) {
+        if let Some(path) = self.navigation.forward() {
+            self.load_path(path, true);
+        }
+    }
+
+    fn navigate_up(&mut self) {
+        if let Some(path) = self.navigation.up() {
+            self.navigate_to(path);
+        }
+    }
+
+    fn selected_folder_entry(&self) -> Option<&FolderEntry> {
+        let selected = self.selected_folder.as_ref()?;
+        self.folders.iter().find(|folder| &folder.id == selected)
+    }
+
+    fn selected_file_entry(&self) -> Option<&FileEntry> {
+        let selected = self.selected_file.as_ref()?;
+        self.right_files.iter().find(|file| &file.id == selected)
+    }
+
+    fn folder_index(&self, id: &ItemId) -> Option<usize> {
+        self.folders.iter().position(|folder| &folder.id == id)
+    }
+
+    fn selected_folder_path(&self) -> Option<PathBuf> {
+        self.selected_folder_entry()
+            .map(|folder| folder.path.clone())
+    }
+
+    fn selected_file_path(&self) -> Option<PathBuf> {
+        self.selected_file_entry().map(|file| file.path.clone())
+    }
+
+    fn scan_status(&self) -> Option<String> {
+        self.tasks.active_tasks().next().map(|(_, task)| {
+            let label = match task.kind {
+                TaskKind::ScanRoot => "Scanning folders",
+                TaskKind::ScanFolder => "Loading files",
+            };
+            format!("{}: {}", label, task.path.display())
+        })
     }
 
     /// Execute a pending rename.
@@ -230,15 +365,15 @@ impl LuxePixApp {
                 match std::fs::rename(&rename.original_path, &new_path) {
                     Ok(_) => {
                         self.status = format!("Renamed \"{}\" to \"{}\".", old_name, new_name);
-                        // Refresh
-                        if let Some(path) = self.current_path.clone() {
-                            self.folders = scanner::scan_directory(&path);
-                            if let Some(sel) = self.selected_folder {
-                                if sel < self.folders.len() {
-                                    self.select_folder(sel);
-                                }
-                            }
+                        let old_id = ItemId::from(rename.original_path.as_path());
+                        let new_id = ItemId::from(new_path.as_path());
+                        if self.selected_folder.as_ref() == Some(&old_id) {
+                            self.selected_folder = Some(new_id.clone());
                         }
+                        if self.selected_file.as_ref() == Some(&old_id) {
+                            self.selected_file = Some(new_id);
+                        }
+                        self.refresh_current_view();
                     }
                     Err(e) => self.status = format!("Rename failed: {}", e),
                 }
@@ -255,31 +390,23 @@ impl LuxePixApp {
     }
 
     fn selected_paths(&self) -> Vec<PathBuf> {
-        if let Some(idx) = self.selected_file {
-            if let Some(file) = self.right_files.get(idx) {
-                return vec![file.path.clone()];
-            }
+        if let Some(path) = self.selected_file_path() {
+            return vec![path];
         }
-        if let Some(idx) = self.selected_folder {
-            if let Some(folder) = self.folders.get(idx) {
-                return vec![folder.path.clone()];
-            }
+        if let Some(path) = self.selected_folder_path() {
+            return vec![path];
         }
         Vec::new()
     }
 
     fn active_target_dir(&self) -> Option<PathBuf> {
-        self.selected_folder
-            .and_then(|idx| self.folders.get(idx))
-            .map(|folder| folder.path.clone())
+        self.selected_folder_path()
             .or_else(|| self.current_path.clone())
     }
 
     fn command_context(&self) -> CommandContext {
-        let has_previewable_selection = self
-            .selected_file
-            .and_then(|idx| self.right_files.get(idx))
-            .is_some_and(|file| file.is_image);
+        let has_previewable_selection =
+            self.selected_file_entry().is_some_and(|file| file.is_image);
         let has_current_path = self.current_path.is_some();
 
         CommandContext {
@@ -289,11 +416,9 @@ impl LuxePixApp {
             has_current_path,
             has_items: !self.folders.is_empty() || !self.right_files.is_empty(),
             has_previewable_selection,
-            can_navigate_up: self
-                .current_path
-                .as_deref()
-                .and_then(Path::parent)
-                .is_some(),
+            can_navigate_back: self.navigation.can_back(),
+            can_navigate_forward: self.navigation.can_forward(),
+            can_navigate_up: self.navigation.can_up(),
             ..CommandContext::default()
         }
     }
@@ -310,21 +435,11 @@ impl LuxePixApp {
 
     fn refresh_current_view(&mut self) {
         if let Some(path) = self.current_path.clone() {
-            let selected_folder_path = self
-                .selected_folder
-                .and_then(|idx| self.folders.get(idx))
-                .map(|f| f.path.clone());
-            self.folders = scanner::scan_directory(&path);
-            if let Some(sel_path) = selected_folder_path {
-                if let Some(new_idx) = self.folders.iter().position(|f| f.path == sel_path) {
-                    self.select_folder(new_idx);
-                } else {
-                    self.selected_folder = None;
-                    self.right_files.clear();
-                    self.right_image_paths.clear();
-                    self.selected_file = None;
-                }
+            self.root_scan_task = Some(self.tasks.scan_root(&path));
+            if let Some(folder_path) = self.selected_folder_path() {
+                self.folder_scan_task = Some(self.tasks.scan_folder(&folder_path));
             }
+            self.status = format!("Refreshing {}...", path.display());
         }
     }
 
@@ -355,20 +470,18 @@ impl LuxePixApp {
             }
             CommandId::Paste => self.paste_clipboard(),
             CommandId::Rename => {
-                if let Some(idx) = self.selected_file {
-                    if let Some(file) = self.right_files.get(idx) {
-                        self.renaming = Some(RenameState {
-                            original_path: file.path.clone(),
-                            new_name: file.name.clone(),
-                        });
-                    }
-                } else if let Some(idx) = self.selected_folder {
-                    if let Some(folder) = self.folders.get(idx) {
-                        self.renaming = Some(RenameState {
-                            original_path: folder.path.clone(),
-                            new_name: folder.name.clone(),
-                        });
-                    }
+                let target = self
+                    .selected_file_entry()
+                    .map(|file| (file.path.clone(), file.name.clone()))
+                    .or_else(|| {
+                        self.selected_folder_entry()
+                            .map(|folder| (folder.path.clone(), folder.name.clone()))
+                    });
+                if let Some((original_path, new_name)) = target {
+                    self.renaming = Some(RenameState {
+                        original_path,
+                        new_name,
+                    });
                 }
             }
             CommandId::Delete | CommandId::DeletePermanent => {
@@ -379,16 +492,12 @@ impl LuxePixApp {
             CommandId::Refresh => {
                 self.thumb_mgr.clear();
                 self.refresh_current_view();
-                self.status = "View refreshed.".into();
             }
             CommandId::Settings => self.open_settings(),
-            CommandId::NewFolder
-            | CommandId::SelectAll
-            | CommandId::Undo
-            | CommandId::Find
-            | CommandId::Back
-            | CommandId::Forward
-            | CommandId::Up => {
+            CommandId::Back => self.navigate_back(),
+            CommandId::Forward => self.navigate_forward(),
+            CommandId::Up => self.navigate_up(),
+            CommandId::NewFolder | CommandId::SelectAll | CommandId::Undo | CommandId::Find => {
                 self.status = format!(
                     "{} is registered and will be enabled with its explorer feature.",
                     command.short_label()
@@ -398,31 +507,29 @@ impl LuxePixApp {
     }
 
     fn open_selected_item(&mut self) {
-        if let Some(idx) = self.selected_file {
-            if let Some(file) = self.right_files.get(idx) {
-                if file.is_image {
-                    if let Some(img_idx) =
-                        self.right_image_paths.iter().position(|p| p == &file.path)
-                    {
-                        let p = self.right_image_paths[img_idx].clone();
-                        self.full_mgr.request_full(&p);
-                        self.preview = Some(PreviewState {
-                            path: p,
-                            index: img_idx,
-                            zoom: 1.0,
-                            offset: egui::Vec2::ZERO,
-                        });
-                    }
-                } else {
-                    Self::open_file_external(&file.path);
+        if let Some(file) = self.selected_file_entry().cloned() {
+            if file.is_image {
+                if let Some(img_idx) = self
+                    .right_image_paths
+                    .iter()
+                    .position(|path| path == &file.path)
+                {
+                    let path = self.right_image_paths[img_idx].clone();
+                    self.full_mgr.request_full(&path);
+                    self.preview = Some(PreviewState {
+                        path,
+                        index: img_idx,
+                        zoom: 1.0,
+                        offset: egui::Vec2::ZERO,
+                    });
                 }
-                return;
+            } else {
+                Self::open_file_external(&file.path);
             }
+            return;
         }
-        if let Some(idx) = self.selected_folder {
-            if let Some(folder) = self.folders.get(idx) {
-                self.navigate_to(folder.path.clone());
-            }
+        if let Some(path) = self.selected_folder_path() {
+            self.navigate_to(path);
         }
     }
 
@@ -529,6 +636,8 @@ impl eframe::App for LuxePixApp {
         }
         let palette = Palette::for_theme(&self.effective_theme);
 
+        self.process_task_events();
+
         // Process thumbnail results
         let loaded_thumbs = self.thumb_mgr.process_results(ctx);
         let loaded_full = self.full_mgr.process_results(ctx);
@@ -539,18 +648,22 @@ impl eframe::App for LuxePixApp {
         self.handle_global_shortcuts(ctx);
 
         // ── Arrow key navigation (when not in preview and not renaming) ──
-        if self.preview.is_none() && self.renaming.is_none() {
+        if self.preview.is_none()
+            && self.renaming.is_none()
+            && !self.show_settings
+            && !ctx.wants_keyboard_input()
+        {
             let mut key_left = false;
             let mut key_right = false;
             let mut key_up = false;
             let mut key_down = false;
-            let mut key_enter = false;
             ctx.input(|input| {
-                key_left = input.key_pressed(egui::Key::ArrowLeft);
-                key_right = input.key_pressed(egui::Key::ArrowRight);
-                key_up = input.key_pressed(egui::Key::ArrowUp);
-                key_down = input.key_pressed(egui::Key::ArrowDown);
-                key_enter = input.key_pressed(egui::Key::Enter);
+                if !input.modifiers.any() {
+                    key_left = input.key_pressed(egui::Key::ArrowLeft);
+                    key_right = input.key_pressed(egui::Key::ArrowRight);
+                    key_up = input.key_pressed(egui::Key::ArrowUp);
+                    key_down = input.key_pressed(egui::Key::ArrowDown);
+                }
             });
 
             if !self.folders.is_empty() {
@@ -574,17 +687,14 @@ impl eframe::App for LuxePixApp {
                 }
 
                 if let Some(d) = delta {
-                    let current = self.selected_folder.unwrap_or(0) as i32;
+                    let current = self
+                        .selected_folder
+                        .as_ref()
+                        .and_then(|id| self.folder_index(id))
+                        .unwrap_or(0) as i32;
                     let new_idx = (current + d).clamp(0, self.folders.len() as i32 - 1) as usize;
-                    self.select_folder(new_idx);
-                }
-
-                // Enter on folder → navigate into it
-                if key_enter && self.selected_file.is_none() {
-                    if let Some(idx) = self.selected_folder {
-                        let p = self.folders[idx].path.clone();
-                        self.navigate_to(p);
-                    }
+                    let id = self.folders[new_idx].id.clone();
+                    self.select_folder(id);
                 }
             }
         }
@@ -667,6 +777,9 @@ impl eframe::App for LuxePixApp {
         if !self.thumb_mgr.is_idle() || !self.full_mgr.is_idle() {
             ctx.request_repaint();
         }
+        if self.tasks.active_count() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -702,6 +815,22 @@ impl LuxePixApp {
                 .0;
             ui.painter().rect_filled(sep, 0.0, palette.border_soft);
             ui.add_space(4.0);
+
+            for (command, icon, tooltip) in [
+                (CommandId::Back, IconKind::ChevronLeft, "Back"),
+                (CommandId::Forward, IconKind::ChevronRight, "Forward"),
+                (CommandId::Up, IconKind::ChevronUp, "Up"),
+            ] {
+                if ui
+                    .add_enabled_ui(self.command_enabled(command), |ui| {
+                        icon_button(ui, icon, None, tooltip, false, &palette)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.execute_command(command);
+                }
+            }
 
             let path_width = (ui.available_width() - 250.0).clamp(260.0, 620.0);
             let path_frame = egui::Frame::none()
@@ -960,8 +1089,9 @@ impl LuxePixApp {
 
     fn render_status_bar(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_theme(&self.effective_theme);
+        let visible_status = self.scan_status().unwrap_or_else(|| self.status.clone());
         ui.horizontal_centered(|ui| {
-            let dot_color = status_color(&self.status, &palette);
+            let dot_color = status_color(&visible_status, &palette);
             let dot_rect = ui
                 .allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover())
                 .0;
@@ -969,7 +1099,7 @@ impl LuxePixApp {
                 .circle_filled(dot_rect.center(), 3.0, dot_color);
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(&self.status)
+                egui::RichText::new(&visible_status)
                     .size(11.5)
                     .color(palette.text_secondary),
             );
@@ -1425,9 +1555,8 @@ impl LuxePixApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let selected_label = self
-                        .selected_file
-                        .and_then(|idx| self.right_files.get(idx))
-                        .map(|f| truncate_str(&f.name, 34))
+                        .selected_file_entry()
+                        .map(|file| truncate_str(&file.name, 34))
                         .unwrap_or_else(|| "Clipboard ready".into());
                     ui.label(
                         egui::RichText::new(selected_label)
@@ -1487,8 +1616,8 @@ impl LuxePixApp {
         }
 
         let thumb_size = self.left_thumb_size;
-        let selected = self.selected_folder;
-        let mut new_select: Option<usize> = None;
+        let selected = self.selected_folder.clone();
+        let mut new_select: Option<ItemId> = None;
         let mut start_rename: Option<(PathBuf, String)> = None;
         let mut commit_rename = false;
         let mut cancel_rename = false;
@@ -1506,7 +1635,7 @@ impl LuxePixApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
 
-                    for (i, folder) in self.folders.iter().enumerate() {
+                    for folder in &self.folders {
                         let tile_w = thumb_size.clamp(116.0, 360.0);
                         let thumb_h = (tile_w * 0.75).max(86.0);
                         let tile_h = thumb_h + 58.0;
@@ -1524,13 +1653,16 @@ impl LuxePixApp {
                             self.thumb_mgr.request_thumbnail(p, thumb_size as u32);
                         }
 
-                        let is_sel = selected == Some(i);
+                        let is_sel = selected.as_ref() == Some(&folder.id);
                         paint_tile_shell(ui, rect, is_sel, tile_resp.hovered(), &palette);
 
                         let t_rect =
                             egui::Rect::from_min_size(rect.min, egui::vec2(tile_w, thumb_h));
-                        let thumb_resp =
-                            ui.interact(t_rect, ui.id().with(("lt", i)), egui::Sense::click());
+                        let thumb_resp = ui.interact(
+                            t_rect,
+                            ui.id().with(("lt", &folder.id)),
+                            egui::Sense::click(),
+                        );
 
                         if let Some(ref p) = folder.first_image {
                             if let Some(tex) = self.thumb_mgr.get(p) {
@@ -1555,10 +1687,10 @@ impl LuxePixApp {
                         }
 
                         if thumb_resp.clicked() || tile_resp.clicked() {
-                            new_select = Some(i);
+                            new_select = Some(folder.id.clone());
                         }
                         if thumb_resp.secondary_clicked() || tile_resp.secondary_clicked() {
-                            new_select = Some(i);
+                            new_select = Some(folder.id.clone());
                         }
                         tile_resp.context_menu(|ui| {
                             for command in [
@@ -1607,7 +1739,7 @@ impl LuxePixApp {
                         } else {
                             let name_resp = ui.interact(
                                 name_rect,
-                                ui.id().with(("ln", i)),
+                                ui.id().with(("ln", &folder.id)),
                                 egui::Sense::click(),
                             );
                             ui.painter().text(
@@ -1644,8 +1776,8 @@ impl LuxePixApp {
                 ui.add_space(20.0);
             });
 
-        if let Some(idx) = new_select {
-            self.select_folder(idx);
+        if let Some(id) = new_select {
+            self.select_folder(id);
         }
         if let Some((path, name)) = start_rename {
             self.renaming = Some(RenameState {
@@ -1666,16 +1798,15 @@ impl LuxePixApp {
     fn render_right_pane(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let palette = Palette::for_theme(&self.effective_theme);
         let folder_name = self
-            .selected_folder
-            .and_then(|i| self.folders.get(i))
-            .map(|f| f.name.as_str())
-            .unwrap_or("");
+            .selected_folder_entry()
+            .map(|folder| folder.name.clone())
+            .unwrap_or_default();
         let img_count = self.right_image_paths.len();
-        let other_count = self.right_files.len() - img_count;
+        let other_count = self.right_files.len().saturating_sub(img_count);
         render_pane_header(
             ui,
             &palette,
-            folder_name,
+            &folder_name,
             &format!("{} images  -  {} other files", img_count, other_count),
             &mut self.right_thumb_size,
             80.0..=500.0,
@@ -1715,7 +1846,7 @@ impl LuxePixApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
 
-                    for (fi, file) in self.right_files.iter().enumerate() {
+                    for file in &self.right_files {
                         let tile_w = thumb_size.clamp(120.0, 420.0);
                         let info_h = 48.0;
                         let tile_h = tile_w + info_h;
@@ -1730,13 +1861,16 @@ impl LuxePixApp {
                             continue;
                         }
 
-                        let is_selected = self.selected_file == Some(fi);
+                        let is_selected = self.selected_file.as_ref() == Some(&file.id);
                         paint_tile_shell(ui, rect, is_selected, tile_resp.hovered(), &palette);
 
                         let t_rect =
                             egui::Rect::from_min_size(rect.min, egui::vec2(tile_w, tile_w));
-                        let thumb_resp =
-                            ui.interact(t_rect, ui.id().with(("rt", fi)), egui::Sense::click());
+                        let thumb_resp = ui.interact(
+                            t_rect,
+                            ui.id().with(("rt", &file.id)),
+                            egui::Sense::click(),
+                        );
 
                         if file.is_image {
                             self.thumb_mgr
@@ -1754,7 +1888,7 @@ impl LuxePixApp {
                             }
 
                             if thumb_resp.clicked() || tile_resp.clicked() {
-                                self.selected_file = Some(fi);
+                                self.selected_file = Some(file.id.clone());
                             }
                             if thumb_resp.double_clicked() || tile_resp.double_clicked() {
                                 if let Some(img_idx) =
@@ -1766,7 +1900,7 @@ impl LuxePixApp {
                         } else {
                             paint_file_placeholder(ui, t_rect.shrink(1.0), file, &palette);
                             if thumb_resp.clicked() || tile_resp.clicked() {
-                                self.selected_file = Some(fi);
+                                self.selected_file = Some(file.id.clone());
                             }
                             if thumb_resp.double_clicked() || tile_resp.double_clicked() {
                                 open_external = Some(file.path.clone());
@@ -1774,7 +1908,7 @@ impl LuxePixApp {
                         }
 
                         if tile_resp.secondary_clicked() || thumb_resp.secondary_clicked() {
-                            self.selected_file = Some(fi);
+                            self.selected_file = Some(file.id.clone());
                         }
                         tile_resp.context_menu(|ui| {
                             for command in [
@@ -1823,7 +1957,7 @@ impl LuxePixApp {
                         } else {
                             let name_resp = ui.interact(
                                 name_rect,
-                                ui.id().with(("rn", fi)),
+                                ui.id().with(("rn", &file.id)),
                                 egui::Sense::click(),
                             );
                             ui.painter().text(
@@ -2275,6 +2409,7 @@ enum IconKind {
     Close,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
     HardDrive,
     Loader,
     Doc,
@@ -2903,6 +3038,12 @@ fn draw_icon(
         IconKind::ChevronRight => {
             painter.add(egui::Shape::line(
                 vec![p(9.0, 6.0), p(15.0, 12.0), p(9.0, 18.0)],
+                stroke,
+            ));
+        }
+        IconKind::ChevronUp => {
+            painter.add(egui::Shape::line(
+                vec![p(6.0, 15.0), p(12.0, 9.0), p(18.0, 15.0)],
                 stroke,
             ));
         }

@@ -1,26 +1,12 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::model::{FileEntry, FolderEntry, ItemId};
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff", "tif", "ico", "avif",
 ];
-
-pub struct FolderEntry {
-    pub path: PathBuf,
-    pub name: String,
-    pub first_image: Option<PathBuf>,
-    pub image_count: usize,
-    pub total_files: usize,
-}
-
-/// A file entry — either an image or a generic file.
-pub struct FileEntry {
-    pub path: PathBuf,
-    pub name: String,
-    pub is_image: bool,
-    pub extension: String,
-    pub size_bytes: u64,
-}
 
 pub fn is_image_file(path: &Path) -> bool {
     path.extension()
@@ -30,12 +16,10 @@ pub fn is_image_file(path: &Path) -> bool {
 }
 
 /// Scan a directory and return info about each sub-folder (first image + count).
-pub fn scan_directory(path: &Path) -> Vec<FolderEntry> {
+pub fn scan_directory(path: &Path) -> io::Result<Vec<FolderEntry>> {
     let mut folders = Vec::new();
 
-    let Ok(entries) = fs::read_dir(path) else {
-        return folders;
-    };
+    let entries = fs::read_dir(path)?;
 
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -46,7 +30,7 @@ pub fn scan_directory(path: &Path) -> Vec<FolderEntry> {
     dirs.sort_by(|a, b| natord::compare(&a.to_string_lossy(), &b.to_string_lossy()));
 
     for dir in dirs {
-        let all = list_all_files(&dir);
+        let all = list_all_files(&dir).unwrap_or_default();
         let first_img = all.iter().find(|f| f.is_image).map(|f| f.path.clone());
         let img_count = all.iter().filter(|f| f.is_image).count();
         let total = all.len();
@@ -57,6 +41,7 @@ pub fn scan_directory(path: &Path) -> Vec<FolderEntry> {
             .to_string();
 
         folders.push(FolderEntry {
+            id: ItemId::from(dir.as_path()),
             path: dir,
             name,
             first_image: first_img,
@@ -65,40 +50,40 @@ pub fn scan_directory(path: &Path) -> Vec<FolderEntry> {
         });
     }
 
-    folders
+    Ok(folders)
 }
 
 /// List ALL files in a directory (non-recursive), sorted naturally.
 /// Images come first, then other files.
-pub fn list_all_files(path: &Path) -> Vec<FileEntry> {
+pub fn list_all_files(path: &Path) -> io::Result<Vec<FileEntry>> {
     let mut files = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let name = p
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let ext = p
-                .extension()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-
-            files.push(FileEntry {
-                is_image: is_image_file(&p),
-                path: p,
-                name,
-                extension: ext,
-                size_bytes: size,
-            });
+    let entries = fs::read_dir(path)?;
+    for entry in entries.filter_map(Result::ok) {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
         }
+        let name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let ext = p
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+
+        files.push(FileEntry {
+            id: ItemId::from(p.as_path()),
+            is_image: is_image_file(&p),
+            path: p,
+            name,
+            extension: ext,
+            size_bytes: size,
+        });
     }
 
     // Sort: images first, then by name naturally
@@ -108,7 +93,7 @@ pub fn list_all_files(path: &Path) -> Vec<FileEntry> {
             .then_with(|| natord::compare(&a.name, &b.name))
     });
 
-    files
+    Ok(files)
 }
 
 /// Format bytes to human-readable size string.
