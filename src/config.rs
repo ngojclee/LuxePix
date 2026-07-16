@@ -1,13 +1,14 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::commands::CommandId;
 use crate::storage::{transactional_write, StoragePaths};
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 const MAX_HISTORY: usize = 50;
 const SHORTCUT_PROFILE_VERSION: u32 = 1;
 
@@ -22,14 +23,26 @@ pub struct AppConfig {
     pub last_path: Option<String>,
     pub theme: String,
     pub shortcuts: ShortcutConfig,
+    pub sources: Vec<SourceConfig>,
     pub show_hidden_files: bool,
     pub show_selection_checkboxes: bool,
     pub confirm_permanent_delete: bool,
     pub check_updates_on_startup: bool,
+    pub indexing_enabled: bool,
     pub similarity_result_count: usize,
+    pub sidebar_collapsed: bool,
+    pub details_panel_open: bool,
     pub first_run_complete: bool,
     #[serde(skip)]
     config_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceConfig {
+    pub name: String,
+    pub path: String,
+    pub favorite: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -80,6 +93,16 @@ impl Default for ShortcutConfig {
             up: CommandId::Up.default_shortcut().into(),
             preview: CommandId::Preview.default_shortcut().into(),
             settings: CommandId::Settings.default_shortcut().into(),
+        }
+    }
+}
+
+impl Default for SourceConfig {
+    fn default() -> Self {
+        Self {
+            name: "Products".into(),
+            path: String::new(),
+            favorite: false,
         }
     }
 }
@@ -184,11 +207,15 @@ impl Default for AppConfig {
             last_path: None,
             theme: "system".into(),
             shortcuts: ShortcutConfig::default(),
+            sources: Vec::new(),
             show_hidden_files: false,
             show_selection_checkboxes: false,
             confirm_permanent_delete: true,
             check_updates_on_startup: true,
+            indexing_enabled: true,
             similarity_result_count: 10,
+            sidebar_collapsed: false,
+            details_panel_open: true,
             first_run_complete: false,
             config_path: PathBuf::new(),
         }
@@ -251,6 +278,40 @@ impl AppConfig {
         let _ = self.save();
     }
 
+    pub fn add_source(&mut self, path: &Path) {
+        let path_value = path.to_string_lossy().to_string();
+        if self
+            .sources
+            .iter()
+            .any(|source| source.path.eq_ignore_ascii_case(&path_value))
+        {
+            return;
+        }
+        let name = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path_value.clone());
+        self.sources.push(SourceConfig {
+            name,
+            path: path_value,
+            favorite: self.sources.is_empty(),
+        });
+        let _ = self.save();
+    }
+
+    pub fn remove_source(&mut self, path: &str) {
+        self.sources.retain(|source| source.path != path);
+        let _ = self.save();
+    }
+
+    pub fn toggle_source_favorite(&mut self, path: &str) {
+        if let Some(source) = self.sources.iter_mut().find(|source| source.path == path) {
+            source.favorite = !source.favorite;
+            let _ = self.save();
+        }
+    }
+
     pub fn save_ui_state(&mut self, left_thumb: f32, right_thumb: f32, panel_width: f32) {
         let changed = (self.left_thumb_size - left_thumb).abs() > 0.5
             || (self.right_thumb_size - right_thumb).abs() > 0.5
@@ -296,6 +357,21 @@ impl AppConfig {
         }
         self.similarity_result_count = self.similarity_result_count.clamp(5, 50);
         self.path_history.truncate(MAX_HISTORY);
+        for source in &mut self.sources {
+            source.path = source.path.trim().to_string();
+            source.name = source.name.trim().to_string();
+            if source.name.is_empty() {
+                source.name = Path::new(&source.path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| source.path.clone());
+            }
+        }
+        let mut seen_sources = HashSet::new();
+        self.sources.retain(|source| {
+            !source.path.is_empty()
+                && seen_sources.insert(source.path.replace('/', "\\").to_ascii_lowercase())
+        });
     }
 }
 
@@ -482,5 +558,59 @@ mod tests {
             vec![CommandId::Copy],
             "invalid shortcut should identify its command"
         );
+    }
+
+    #[test]
+    fn migrates_older_config_and_normalizes_sources() {
+        let paths = test_paths("migration");
+        paths.ensure().expect("create config directories");
+        let json = serde_json::json!({
+            "schema_version": 2,
+            "theme": "unknown",
+            "similarity_result_count": 500,
+            "sources": [
+                {"name": "", "path": "  N:/Products  ", "favorite": true},
+                {"name": "Duplicate", "path": "n:\\products", "favorite": false},
+                {"name": "Empty", "path": " ", "favorite": false}
+            ]
+        });
+        fs::write(
+            &paths.config,
+            serde_json::to_vec_pretty(&json).expect("serialize legacy config"),
+        )
+        .expect("write legacy config");
+
+        let loaded = AppConfig::load(&paths);
+
+        assert_eq!(loaded.schema_version, 3);
+        assert_eq!(loaded.theme, "system");
+        assert_eq!(loaded.similarity_result_count, 50);
+        assert_eq!(loaded.sources.len(), 1);
+        assert_eq!(loaded.sources[0].name, "Products");
+        assert_eq!(loaded.sources[0].path, "N:/Products");
+        fs::remove_dir_all(paths.executable_dir).expect("remove test root");
+    }
+
+    #[test]
+    fn source_changes_are_persisted() {
+        let paths = test_paths("sources");
+        let source_path = paths.executable_dir.join("Products");
+        fs::create_dir_all(&source_path).expect("create source folder");
+        let mut config = AppConfig::load(&paths);
+
+        config.add_source(&source_path);
+        assert_eq!(config.sources.len(), 1);
+        assert!(config.sources[0].favorite);
+
+        let source_value = source_path.to_string_lossy().to_string();
+        config.toggle_source_favorite(&source_value);
+        let loaded = AppConfig::load(&paths);
+        assert_eq!(loaded.sources.len(), 1);
+        assert!(!loaded.sources[0].favorite);
+
+        config.remove_source(&source_value);
+        let loaded = AppConfig::load(&paths);
+        assert!(loaded.sources.is_empty());
+        fs::remove_dir_all(paths.executable_dir).expect("remove test root");
     }
 }

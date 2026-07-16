@@ -37,13 +37,13 @@ This checklist follows:
 - [x] Add path-based stable item IDs.
 - [x] Add background task/event infrastructure.
 - [x] Move scans and long operations off the egui frame thread.
-- [ ] Split large UI sections out of `src/app.rs`.
-- [ ] Rebuild the approved `design/` shell in reusable egui components.
-- [ ] Add first-run source/cache/index setup.
+- [x] Split large UI sections out of `src/app.rs`.
+- [x] Rebuild the approved `design/` shell in reusable egui components.
+- [x] Add first-run source/cache/index setup.
 - [x] Add tabbed Settings.
-- [ ] Add compact source/favorites/recent sidebar.
-- [ ] Add collapsible details panel.
-- [~] Fix inline rename so row/tile geometry never moves.
+- [x] Add compact source/favorites/recent sidebar.
+- [x] Add collapsible details panel.
+- [x] Fix inline rename so row/tile geometry never moves.
 
 ## E2 - Explorer Interaction
 
@@ -179,3 +179,9 @@ This checklist follows:
   scans onto typed background tasks with stale-result rejection.
 - 2026-07-16: Background-scan verification passed with format, strict Clippy,
   16 unit tests, locked release build, and an asynchronous startup smoke test.
+- 2026-07-16: Completed the E1 visual shell with reusable sidebar, details,
+  and first-run modules; source/favorite persistence; responsive compact
+  layout; and a fixed-geometry inline rename editor.
+- 2026-07-16: E1 visual-shell verification passed with format, strict Clippy,
+  18 unit tests, locked release build, and a four-second release startup smoke
+  test.

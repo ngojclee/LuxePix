@@ -12,6 +12,10 @@ use crate::storage::{transactional_write, StoragePaths};
 use crate::tasks::{TaskEvent, TaskId, TaskKind, TaskManager};
 use crate::thumbs::ThumbManager;
 
+mod details;
+mod first_run;
+mod sidebar;
+
 // ── Preview state ──────────────────────────────────────────────
 struct PreviewState {
     path: PathBuf,
@@ -55,6 +59,9 @@ pub struct LuxePixApp {
     settings_tab: SettingsTab,
     shortcut_draft: ShortcutConfig,
     shortcut_capture: Option<CommandId>,
+    first_run_step: usize,
+    first_run_source: String,
+    first_run_source_valid: bool,
     clipboard: Option<FileClipboard>,
     pending_delete: Option<PendingDelete>,
 
@@ -124,6 +131,16 @@ impl LuxePixApp {
         let config = AppConfig::load(&storage);
         let effective_theme = apply_theme(&cc.egui_ctx, &config.theme).to_string();
         let shortcut_draft = config.shortcuts.clone();
+        let first_run_source = config
+            .sources
+            .first()
+            .map(|source| source.path.clone())
+            .or_else(|| config.last_path.clone())
+            .unwrap_or_default();
+        let first_run_source_valid = config
+            .sources
+            .iter()
+            .any(|source| source.path.eq_ignore_ascii_case(&first_run_source));
 
         let mut app = Self {
             path_input: String::new(),
@@ -151,14 +168,17 @@ impl LuxePixApp {
             settings_tab: SettingsTab::General,
             shortcut_draft,
             shortcut_capture: None,
+            first_run_step: 0,
+            first_run_source,
+            first_run_source_valid,
             clipboard: None,
             pending_delete: None,
             status: "Ready. Pick a folder above or choose a recent path.".into(),
         };
 
         if let Some(ref last) = app.config.last_path.clone() {
-            let p = PathBuf::from(last);
-            if p.is_dir() {
+            if !last.trim().is_empty() {
+                let p = PathBuf::from(last);
                 app.navigation.restore(p.clone());
                 app.load_path(p, false);
             }
@@ -613,6 +633,7 @@ impl LuxePixApp {
             || self.renaming.is_some()
             || self.show_settings
             || self.pending_delete.is_some()
+            || !self.config.first_run_complete
         {
             return;
         }
@@ -651,6 +672,7 @@ impl eframe::App for LuxePixApp {
         if self.preview.is_none()
             && self.renaming.is_none()
             && !self.show_settings
+            && self.config.first_run_complete
             && !ctx.wants_keyboard_input()
         {
             let mut key_left = false;
@@ -727,12 +749,45 @@ impl eframe::App for LuxePixApp {
             )
             .show(ctx, |ui| self.render_status_bar(ui));
 
+        let available_width = ctx.available_rect().width();
+        let compact_sidebar = available_width < 1_040.0;
+        let sidebar_width = if self.config.sidebar_collapsed || compact_sidebar {
+            52.0
+        } else {
+            190.0
+        };
+
+        egui::SidePanel::left("navigation_sidebar")
+            .exact_width(sidebar_width)
+            .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(palette.surface)
+                    .stroke(egui::Stroke::new(1.0, palette.border_soft))
+                    .inner_margin(egui::Margin::symmetric(10.0, 12.0)),
+            )
+            .show(ctx, |ui| {
+                self.render_navigation_sidebar(ui, compact_sidebar);
+            });
+
         // ── Left pane (folder grid) ──
         let panel_width = self.config.left_panel_width;
+        let left_min_width = if available_width < 1_040.0 {
+            240.0
+        } else {
+            280.0
+        };
+        let details_reserve = if self.config.details_panel_open {
+            220.0
+        } else {
+            0.0
+        };
+        let left_max_width = (available_width - sidebar_width - details_reserve - 260.0)
+            .clamp(left_min_width, 760.0);
         let left_resp = egui::SidePanel::left("left_pane")
-            .default_width(panel_width)
-            .min_width(280.0)
-            .max_width(760.0)
+            .default_width(panel_width.min(left_max_width))
+            .min_width(left_min_width)
+            .max_width(left_max_width)
             .resizable(true)
             .frame(egui::Frame::none().fill(palette.surface))
             .show(ctx, |ui| {
@@ -740,6 +795,23 @@ impl eframe::App for LuxePixApp {
             });
         // Track panel width for config save
         let new_panel_w = left_resp.response.rect.width();
+
+        if self.config.details_panel_open {
+            egui::SidePanel::right("details_panel")
+                .default_width(270.0)
+                .min_width(220.0)
+                .max_width(340.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::none()
+                        .fill(palette.surface)
+                        .stroke(egui::Stroke::new(1.0, palette.border_soft))
+                        .inner_margin(egui::Margin::symmetric(14.0, 12.0)),
+                )
+                .show(ctx, |ui| {
+                    self.render_details_panel(ui);
+                });
+        }
 
         // ── Right pane (all files grid) ──
         egui::CentralPanel::default()
@@ -766,6 +838,8 @@ impl eframe::App for LuxePixApp {
         if self.pending_delete.is_some() {
             self.render_delete_confirmation(ctx);
         }
+
+        self.render_first_run(ctx);
 
         // (Rename is now inline in panes — no separate dialog needed)
 
@@ -943,6 +1017,23 @@ impl LuxePixApp {
                 .clicked()
                 {
                     self.execute_command(CommandId::Settings);
+                }
+                if icon_button(
+                    ui,
+                    IconKind::Info,
+                    None,
+                    if self.config.details_panel_open {
+                        "Hide details"
+                    } else {
+                        "Show details"
+                    },
+                    self.config.details_panel_open,
+                    &palette,
+                )
+                .clicked()
+                {
+                    self.config.details_panel_open = !self.config.details_panel_open;
+                    let _ = self.config.save();
                 }
             });
         });
@@ -2416,6 +2507,7 @@ enum IconKind {
     Video,
     File,
     Archive,
+    Info,
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
@@ -3099,6 +3191,11 @@ fn draw_icon(
             painter.rect_stroke(r(3.0, 4.0, 21.0, 8.0), 1.0, stroke);
             painter.rect_stroke(r(5.0, 8.0, 19.0, 20.0), 2.0, stroke);
             painter.line_segment([p(10.0, 13.0), p(14.0, 13.0)], stroke);
+        }
+        IconKind::Info => {
+            painter.circle_stroke(p(12.0, 12.0), rect.width() * 8.0 / 24.0, stroke);
+            painter.circle_filled(p(12.0, 8.0), rect.width() * 1.0 / 24.0, color);
+            painter.line_segment([p(12.0, 11.0), p(12.0, 17.0)], stroke);
         }
     }
 }
