@@ -12,6 +12,7 @@ pub struct CommandContext {
     pub can_navigate_forward: bool,
     pub can_navigate_up: bool,
     pub can_undo: bool,
+    pub has_single_selection: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -34,10 +35,13 @@ pub enum CommandId {
     Up,
     Preview,
     Settings,
+    OpenWith,
+    RevealInExplorer,
+    EditAddress,
 }
 
 impl CommandId {
-    pub const CONFIGURABLE: [Self; 17] = [
+    pub const CONFIGURABLE: [Self; 20] = [
         Self::Copy,
         Self::Cut,
         Self::Paste,
@@ -55,10 +59,14 @@ impl CommandId {
         Self::Up,
         Self::Preview,
         Self::Settings,
+        Self::OpenWith,
+        Self::RevealInExplorer,
+        Self::EditAddress,
     ];
 
-    pub const ACTIVE: [Self; 12] = [
+    pub const ACTIVE: [Self; 17] = [
         Self::Settings,
+        Self::EditAddress,
         Self::Back,
         Self::Forward,
         Self::Up,
@@ -67,7 +75,11 @@ impl CommandId {
         Self::Paste,
         Self::Rename,
         Self::Delete,
+        Self::DeletePermanent,
         Self::Open,
+        Self::OpenWith,
+        Self::RevealInExplorer,
+        Self::SelectAll,
         Self::Refresh,
         Self::Preview,
     ];
@@ -91,6 +103,9 @@ impl CommandId {
             Self::Up => "Up",
             Self::Preview => "Preview",
             Self::Settings => "Settings",
+            Self::OpenWith => "Open With",
+            Self::RevealInExplorer => "Reveal in Windows Explorer",
+            Self::EditAddress => "Focus Address Bar",
         }
     }
 
@@ -100,6 +115,8 @@ impl CommandId {
             Self::DeletePermanent => "Delete Permanently",
             Self::Find => "Find",
             Self::Preview => "Preview",
+            Self::RevealInExplorer => "Reveal in Explorer",
+            Self::EditAddress => "Address Bar",
             _ => self.label(),
         }
     }
@@ -123,17 +140,18 @@ impl CommandId {
             Self::Up => "Alt+Up",
             Self::Preview => "Space",
             Self::Settings => "Ctrl+,",
+            Self::OpenWith => "Shift+Enter",
+            Self::RevealInExplorer => "Ctrl+Shift+E",
+            Self::EditAddress => "Ctrl+L",
         }
     }
 
     pub const fn enabled(self, context: CommandContext) -> bool {
         match self {
-            Self::Copy
-            | Self::Cut
-            | Self::Rename
-            | Self::Delete
-            | Self::DeletePermanent
-            | Self::Open => context.has_selection,
+            Self::Copy | Self::Cut | Self::Delete | Self::DeletePermanent => context.has_selection,
+            Self::Rename | Self::Open | Self::OpenWith | Self::RevealInExplorer => {
+                context.has_single_selection
+            }
             Self::Paste => context.has_clipboard && context.has_target_directory,
             Self::NewFolder | Self::Refresh | Self::Find => context.has_current_path,
             Self::SelectAll => context.has_items,
@@ -142,7 +160,7 @@ impl CommandId {
             Self::Forward => context.can_navigate_forward,
             Self::Up => context.can_navigate_up,
             Self::Preview => context.has_previewable_selection,
-            Self::Settings => true,
+            Self::Settings | Self::EditAddress => true,
         }
     }
 }
@@ -176,11 +194,23 @@ mod tests {
 
         let selected = CommandContext {
             has_selection: true,
+            has_single_selection: true,
             has_previewable_selection: true,
             ..empty
         };
         assert!(CommandId::Copy.enabled(selected));
+        assert!(CommandId::Open.enabled(selected));
+        assert!(CommandId::Rename.enabled(selected));
         assert!(CommandId::Preview.enabled(selected));
+
+        let multi_selected = CommandContext {
+            has_selection: true,
+            has_single_selection: false,
+            ..empty
+        };
+        assert!(CommandId::Copy.enabled(multi_selected));
+        assert!(!CommandId::Open.enabled(multi_selected));
+        assert!(!CommandId::Rename.enabled(multi_selected));
 
         let clipboard_without_target = CommandContext {
             has_clipboard: true,

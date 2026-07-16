@@ -6,6 +6,8 @@ mod config;
 mod model;
 mod navigation;
 mod scanner;
+mod selection;
+mod sorting;
 mod storage;
 mod tasks;
 mod thumbs;

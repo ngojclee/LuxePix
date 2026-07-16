@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use crate::model::{FileEntry, FolderEntry};
-use crate::scanner;
+use crate::scanner::{self, ScanOptions};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TaskId(u64);
@@ -76,13 +76,13 @@ impl TaskManager {
         }
     }
 
-    pub fn scan_root(&mut self, path: &Path) -> TaskId {
+    pub fn scan_root(&mut self, path: &Path, options: ScanOptions) -> TaskId {
         let id = self.start(TaskKind::ScanRoot, path);
         let path = path.to_path_buf();
         let event_path = path.clone();
         let tx = self.event_tx.clone();
         self.pool.spawn(move || {
-            let event = match scanner::scan_directory(&path) {
+            let event = match scanner::scan_directory(&path, options) {
                 Ok(folders) => TaskEvent::RootScanned {
                     id,
                     path: event_path,
@@ -100,13 +100,13 @@ impl TaskManager {
         id
     }
 
-    pub fn scan_folder(&mut self, path: &Path) -> TaskId {
+    pub fn scan_folder(&mut self, path: &Path, options: ScanOptions) -> TaskId {
         let id = self.start(TaskKind::ScanFolder, path);
         let path = path.to_path_buf();
         let event_path = path.clone();
         let tx = self.event_tx.clone();
         self.pool.spawn(move || {
-            let event = match scanner::list_all_files(&path) {
+            let event = match scanner::list_all_files(&path, options) {
                 Ok(files) => TaskEvent::FolderScanned {
                     id,
                     path: event_path,
@@ -163,6 +163,7 @@ impl TaskManager {
 #[cfg(test)]
 mod tests {
     use super::{TaskEvent, TaskManager};
+    use crate::scanner::ScanOptions;
     use std::fs;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -180,7 +181,7 @@ mod tests {
             .expect("write scan fixture");
 
         let mut tasks = TaskManager::new(1);
-        let expected_id = tasks.scan_root(&root);
+        let expected_id = tasks.scan_root(&root, ScanOptions::default());
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut result = None;
         while Instant::now() < deadline {

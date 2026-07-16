@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::CommandId;
+use crate::model::{SortDirection, SortField, ViewMode};
 use crate::storage::{transactional_write, StoragePaths};
 
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 const MAX_HISTORY: usize = 50;
 const SHORTCUT_PROFILE_VERSION: u32 = 1;
 
@@ -32,6 +33,9 @@ pub struct AppConfig {
     pub similarity_result_count: usize,
     pub sidebar_collapsed: bool,
     pub details_panel_open: bool,
+    pub file_view_mode: ViewMode,
+    pub sort_field: SortField,
+    pub sort_direction: SortDirection,
     pub first_run_complete: bool,
     #[serde(skip)]
     config_path: PathBuf,
@@ -65,6 +69,9 @@ pub struct ShortcutConfig {
     pub up: String,
     pub preview: String,
     pub settings: String,
+    pub open_with: String,
+    pub reveal_in_explorer: String,
+    pub edit_address: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +100,9 @@ impl Default for ShortcutConfig {
             up: CommandId::Up.default_shortcut().into(),
             preview: CommandId::Preview.default_shortcut().into(),
             settings: CommandId::Settings.default_shortcut().into(),
+            open_with: CommandId::OpenWith.default_shortcut().into(),
+            reveal_in_explorer: CommandId::RevealInExplorer.default_shortcut().into(),
+            edit_address: CommandId::EditAddress.default_shortcut().into(),
         }
     }
 }
@@ -127,6 +137,9 @@ impl ShortcutConfig {
             CommandId::Up => &self.up,
             CommandId::Preview => &self.preview,
             CommandId::Settings => &self.settings,
+            CommandId::OpenWith => &self.open_with,
+            CommandId::RevealInExplorer => &self.reveal_in_explorer,
+            CommandId::EditAddress => &self.edit_address,
         }
     }
 
@@ -149,6 +162,9 @@ impl ShortcutConfig {
             CommandId::Up => &mut self.up,
             CommandId::Preview => &mut self.preview,
             CommandId::Settings => &mut self.settings,
+            CommandId::OpenWith => &mut self.open_with,
+            CommandId::RevealInExplorer => &mut self.reveal_in_explorer,
+            CommandId::EditAddress => &mut self.edit_address,
         }
     }
 
@@ -216,6 +232,9 @@ impl Default for AppConfig {
             similarity_result_count: 10,
             sidebar_collapsed: false,
             details_panel_open: true,
+            file_view_mode: ViewMode::Gallery,
+            sort_field: SortField::Name,
+            sort_direction: SortDirection::Ascending,
             first_run_complete: false,
             config_path: PathBuf::new(),
         }
@@ -582,7 +601,7 @@ mod tests {
 
         let loaded = AppConfig::load(&paths);
 
-        assert_eq!(loaded.schema_version, 3);
+        assert_eq!(loaded.schema_version, 4);
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.similarity_result_count, 50);
         assert_eq!(loaded.sources.len(), 1);

@@ -3,8 +3,12 @@ use super::*;
 impl LuxePixApp {
     pub(super) fn render_details_panel(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_theme(&self.effective_theme);
-        let selected_file = self.selected_file_entry().cloned();
-        let selected_folder = self.selected_folder_entry().cloned();
+        let selected_file = (self.active_pane == ExplorerPane::Files)
+            .then(|| self.selected_file_entry().cloned())
+            .flatten();
+        let selected_folder = (self.active_pane == ExplorerPane::Folders)
+            .then(|| self.selected_folder_entry().cloned())
+            .flatten();
 
         ui.horizontal(|ui| {
             ui.label(
@@ -26,7 +30,13 @@ impl LuxePixApp {
         ui.separator();
         ui.add_space(12.0);
 
-        if let Some(file) = selected_file {
+        let selection_count = match self.active_pane {
+            ExplorerPane::Folders => self.folder_selection.len(),
+            ExplorerPane::Files => self.file_selection.len(),
+        };
+        if selection_count > 1 {
+            self.render_selection_summary(ui, selection_count, &palette);
+        } else if let Some(file) = selected_file {
             self.render_file_details(ui, &file, &palette);
         } else if let Some(folder) = selected_folder {
             self.render_folder_details(ui, &folder, &palette);
@@ -39,6 +49,35 @@ impl LuxePixApp {
                 "Select a file or folder to inspect it.",
             );
         }
+    }
+
+    fn render_selection_summary(
+        &self,
+        ui: &mut egui::Ui,
+        selection_count: usize,
+        palette: &Palette,
+    ) {
+        let total_size = match self.active_pane {
+            ExplorerPane::Folders => self
+                .folders
+                .iter()
+                .filter(|folder| self.folder_selection.contains(&folder.id))
+                .map(|folder| folder.size_bytes)
+                .sum(),
+            ExplorerPane::Files => self
+                .right_files
+                .iter()
+                .filter(|file| self.file_selection.contains(&file.id))
+                .map(|file| file.size_bytes)
+                .sum(),
+        };
+        render_small_empty(
+            ui,
+            palette,
+            IconKind::Info,
+            &format!("{selection_count} items selected"),
+            &format!("Combined size: {}", format_size(total_size)),
+        );
     }
 
     fn render_file_details(&mut self, ui: &mut egui::Ui, file: &FileEntry, palette: &Palette) {
@@ -69,6 +108,12 @@ impl LuxePixApp {
         ui.add_space(10.0);
         detail_row(ui, "Type", file_type_label(file), palette);
         detail_row(ui, "Size", &format_size(file.size_bytes), palette);
+        detail_row(
+            ui,
+            "Modified",
+            &super::explorer::format_modified(file.modified_unix),
+            palette,
+        );
         if let Some([width, height]) = self.thumb_mgr.get_original_size(&file.path) {
             detail_row(ui, "Dimensions", &format!("{width} x {height}"), palette);
         }
@@ -113,6 +158,13 @@ impl LuxePixApp {
         ui.add_space(10.0);
         detail_row(ui, "Images", &folder.image_count.to_string(), palette);
         detail_row(ui, "Files", &folder.total_files.to_string(), palette);
+        detail_row(ui, "Size", &format_size(folder.size_bytes), palette);
+        detail_row(
+            ui,
+            "Modified",
+            &super::explorer::format_modified(folder.modified_unix),
+            palette,
+        );
         ui.add_space(10.0);
         detail_path(ui, &folder.path, palette);
         ui.add_space(12.0);

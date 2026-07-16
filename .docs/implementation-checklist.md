@@ -47,20 +47,20 @@ This checklist follows:
 
 ## E2 - Explorer Interaction
 
-- [ ] Add path-based multi-selection.
-- [ ] Add Ctrl toggle, Shift range, Ctrl+A, Escape, and keyboard focus movement.
-- [ ] Add optional selection checkboxes.
-- [ ] Add rectangle selection in grid/gallery.
-- [~] Add Back, Forward, Up, breadcrumbs, and refresh.
-- [ ] Restore prior selection and scroll state per folder.
-- [ ] Add Gallery view.
-- [ ] Add Grid view.
-- [ ] Add Compact List view.
-- [ ] Add Details view.
-- [ ] Add natural sorting by name, date, size, and type with folders first.
-- [ ] Add selection-driven side preview and Space full viewer.
-- [ ] Add Open, Open With, and Reveal in Windows Explorer.
-- [ ] Add hidden-file toggle while keeping protected system files hidden.
+- [x] Add path-based multi-selection.
+- [x] Add Ctrl toggle, Shift range, Ctrl+A, Escape, and keyboard focus movement.
+- [x] Add optional selection checkboxes.
+- [x] Add rectangle selection in grid/gallery.
+- [x] Add Back, Forward, Up, breadcrumbs, and refresh.
+- [x] Restore prior selection and scroll state per folder.
+- [x] Add Gallery view.
+- [x] Add Grid view.
+- [x] Add Compact List view.
+- [x] Add Details view.
+- [x] Add natural sorting by name, date, size, and type with folders first.
+- [x] Add selection-driven side preview and Space full viewer.
+- [x] Add Open, Open With, and Reveal in Windows Explorer.
+- [x] Add hidden-file toggle while keeping protected system files hidden.
 
 ## E3 - Professional File Operations
 
@@ -185,3 +185,10 @@ This checklist follows:
 - 2026-07-16: E1 visual-shell verification passed with format, strict Clippy,
   18 unit tests, locked release build, and a four-second release startup smoke
   test.
+- 2026-07-16: Completed E2 explorer interaction with stable multi-selection,
+  keyboard and rectangle selection, Gallery/Grid/Compact/Details views,
+  natural sorting, clickable breadcrumbs with configurable Ctrl+L address
+  focus, per-folder selection/scroll restoration, preview/open/reveal
+  commands, and hidden-file filtering.
+- 2026-07-16: E2 verification passed with format, strict Clippy, 27 unit tests,
+  a locked release build, and a four-second release startup smoke test.

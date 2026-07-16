@@ -1,18 +1,22 @@
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::{fs, io};
 
 use eframe::egui;
 
 use crate::commands::{CommandContext, CommandId};
 use crate::config::{AppConfig, ShortcutConfig};
-use crate::model::{FileEntry, FolderEntry, ItemId};
+use crate::model::{FileEntry, FolderEntry, ItemId, SortDirection, SortField, ViewMode};
 use crate::navigation::NavigationHistory;
-use crate::scanner::format_size;
+use crate::scanner::{format_size, ScanOptions};
+use crate::selection::SelectionModel;
+use crate::sorting::{sort_files, sort_folders};
 use crate::storage::{transactional_write, StoragePaths};
 use crate::tasks::{TaskEvent, TaskId, TaskKind, TaskManager};
 use crate::thumbs::ThumbManager;
 
 mod details;
+mod explorer;
 mod first_run;
 mod sidebar;
 
@@ -24,6 +28,33 @@ struct PreviewState {
     offset: egui::Vec2,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ExplorerPane {
+    #[default]
+    Folders,
+    Files,
+}
+
+#[derive(Clone, Default)]
+struct RootViewState {
+    selection: SelectionModel,
+    active_folder: Option<ItemId>,
+    scroll_offset: f32,
+}
+
+#[derive(Clone, Default)]
+struct FolderViewState {
+    selection: SelectionModel,
+    scroll_offset: f32,
+}
+
+#[derive(Clone)]
+struct MarqueeState {
+    start: egui::Pos2,
+    current: egui::Pos2,
+    base: SelectionModel,
+}
+
 // ── App state ──────────────────────────────────────────────────
 pub struct LuxePixApp {
     path_input: String,
@@ -32,12 +63,26 @@ pub struct LuxePixApp {
 
     folders: Vec<FolderEntry>,
     selected_folder: Option<ItemId>,
+    folder_selection: SelectionModel,
     left_thumb_size: f32,
+    left_scroll_offset: f32,
+    folder_columns: usize,
+    folder_marquee: Option<MarqueeState>,
 
     right_files: Vec<FileEntry>,
     right_image_paths: Vec<PathBuf>,
     selected_file: Option<ItemId>,
+    file_selection: SelectionModel,
     right_thumb_size: f32,
+    right_scroll_offset: f32,
+    file_columns: usize,
+    file_marquee: Option<MarqueeState>,
+    active_pane: ExplorerPane,
+    pending_folder_scroll_to: Option<ItemId>,
+    pending_file_scroll_to: Option<ItemId>,
+
+    root_view_states: HashMap<PathBuf, RootViewState>,
+    folder_view_states: HashMap<PathBuf, FolderViewState>,
 
     preview: Option<PreviewState>,
 
@@ -62,6 +107,7 @@ pub struct LuxePixApp {
     first_run_step: usize,
     first_run_source: String,
     first_run_source_valid: bool,
+    path_editing: bool,
     clipboard: Option<FileClipboard>,
     pending_delete: Option<PendingDelete>,
 
@@ -148,11 +194,24 @@ impl LuxePixApp {
             navigation: NavigationHistory::default(),
             folders: Vec::new(),
             selected_folder: None,
+            folder_selection: SelectionModel::default(),
             left_thumb_size: config.left_thumb_size,
+            left_scroll_offset: 0.0,
+            folder_columns: 1,
+            folder_marquee: None,
             right_files: Vec::new(),
             right_image_paths: Vec::new(),
             selected_file: None,
+            file_selection: SelectionModel::default(),
             right_thumb_size: config.right_thumb_size,
+            right_scroll_offset: 0.0,
+            file_columns: 1,
+            file_marquee: None,
+            active_pane: ExplorerPane::Folders,
+            pending_folder_scroll_to: None,
+            pending_file_scroll_to: None,
+            root_view_states: HashMap::new(),
+            folder_view_states: HashMap::new(),
             preview: None,
             thumb_mgr: ThumbManager::new(3000, 4),
             full_mgr: ThumbManager::new(5, 2),
@@ -171,6 +230,7 @@ impl LuxePixApp {
             first_run_step: 0,
             first_run_source,
             first_run_source_valid,
+            path_editing: false,
             clipboard: None,
             pending_delete: None,
             status: "Ready. Pick a folder above or choose a recent path.".into(),
@@ -193,8 +253,16 @@ impl LuxePixApp {
     }
 
     fn load_path(&mut self, path: PathBuf, save_recent: bool) {
+        self.remember_current_view_state();
+        let root_state = self
+            .root_view_states
+            .get(&path)
+            .cloned()
+            .unwrap_or_default();
+
         self.current_path = Some(path.clone());
         self.path_input = path.to_string_lossy().to_string();
+        self.path_editing = false;
         self.renaming = None;
         self.show_history = false;
 
@@ -202,30 +270,190 @@ impl LuxePixApp {
             self.config.add_path(&self.path_input);
         }
 
-        self.root_scan_task = Some(self.tasks.scan_root(&path));
+        self.root_scan_task = Some(
+            self.tasks
+                .scan_root(&path, ScanOptions::new(self.config.show_hidden_files)),
+        );
         self.folder_scan_task = None;
         self.folders.clear();
-        self.selected_folder = None;
+        self.folder_selection = root_state.selection;
+        self.selected_folder = root_state.active_folder;
+        self.left_scroll_offset = root_state.scroll_offset;
         self.right_files.clear();
         self.right_image_paths.clear();
-        self.selected_file = None;
+        let folder_state = self
+            .selected_folder
+            .as_ref()
+            .and_then(|id| self.folder_view_states.get(id.as_path()))
+            .cloned()
+            .unwrap_or_default();
+        self.file_selection = folder_state.selection;
+        self.selected_file = self.file_selection.focus().cloned();
+        self.right_scroll_offset = folder_state.scroll_offset;
         self.preview = None;
+        self.pending_folder_scroll_to = self.selected_folder.clone();
+        self.pending_file_scroll_to = self.file_selection.focus().cloned();
         self.status = format!("Scanning {}...", path.display());
     }
 
-    fn select_folder(&mut self, id: ItemId) {
+    fn activate_folder(&mut self, id: ItemId) {
         let Some(folder) = self.folders.iter().find(|folder| folder.id == id) else {
             return;
         };
         let path = folder.path.clone();
         let name = folder.name.clone();
+        if self.selected_folder.as_ref() == Some(&id) && self.folder_scan_task.is_some() {
+            return;
+        }
+
+        self.remember_current_folder_view_state();
         self.selected_folder = Some(id);
-        self.selected_file = None;
+        let folder_state = self
+            .folder_view_states
+            .get(&path)
+            .cloned()
+            .unwrap_or_default();
+        self.file_selection = folder_state.selection;
+        self.selected_file = self.file_selection.focus().cloned();
+        self.right_scroll_offset = folder_state.scroll_offset;
+        self.pending_file_scroll_to = self.file_selection.focus().cloned();
         self.right_files.clear();
         self.right_image_paths.clear();
         self.preview = None;
-        self.folder_scan_task = Some(self.tasks.scan_folder(&path));
+        self.file_marquee = None;
+        self.folder_scan_task = Some(
+            self.tasks
+                .scan_folder(&path, ScanOptions::new(self.config.show_hidden_files)),
+        );
         self.status = format!("Loading {}...", name);
+    }
+
+    fn select_folder_with_modifiers(&mut self, id: ItemId, modifiers: egui::Modifiers) {
+        let ordered = self.ordered_folder_ids();
+        self.folder_selection
+            .apply_click(id, &ordered, modifiers.ctrl, modifiers.shift);
+        self.active_pane = ExplorerPane::Folders;
+        if let Some(focus) = self.folder_selection.focus().cloned() {
+            if self.selected_folder.as_ref() != Some(&focus) {
+                self.activate_folder(focus);
+            }
+        } else {
+            self.clear_active_folder();
+        }
+    }
+
+    fn select_folder_for_context(&mut self, id: ItemId) {
+        self.active_pane = ExplorerPane::Folders;
+        if !self.folder_selection.contains(&id) {
+            self.folder_selection.replace(id.clone());
+        }
+        if self.selected_folder.as_ref() != Some(&id) {
+            self.activate_folder(id);
+        }
+    }
+
+    fn select_file_with_modifiers(&mut self, id: ItemId, modifiers: egui::Modifiers) {
+        let ordered = self.ordered_file_ids();
+        self.file_selection
+            .apply_click(id, &ordered, modifiers.ctrl, modifiers.shift);
+        self.selected_file = self.file_selection.focus().cloned();
+        self.active_pane = ExplorerPane::Files;
+    }
+
+    fn select_file_for_context(&mut self, id: ItemId) {
+        self.active_pane = ExplorerPane::Files;
+        if !self.file_selection.contains(&id) {
+            self.file_selection.replace(id);
+        }
+        self.selected_file = self.file_selection.focus().cloned();
+    }
+
+    fn clear_active_folder(&mut self) {
+        self.remember_current_folder_view_state();
+        self.selected_folder = None;
+        self.file_selection.clear();
+        self.selected_file = None;
+        self.right_files.clear();
+        self.right_image_paths.clear();
+        self.right_scroll_offset = 0.0;
+        self.folder_scan_task = None;
+        self.preview = None;
+        self.pending_file_scroll_to = None;
+    }
+
+    fn clear_active_selection(&mut self) {
+        match self.active_pane {
+            ExplorerPane::Folders => {
+                self.folder_selection.clear();
+                self.pending_folder_scroll_to = None;
+                self.clear_active_folder();
+            }
+            ExplorerPane::Files => {
+                self.file_selection.clear();
+                self.selected_file = None;
+                self.pending_file_scroll_to = None;
+            }
+        }
+    }
+
+    fn ordered_folder_ids(&self) -> Vec<ItemId> {
+        self.folders
+            .iter()
+            .map(|folder| folder.id.clone())
+            .collect()
+    }
+
+    fn ordered_file_ids(&self) -> Vec<ItemId> {
+        self.right_files
+            .iter()
+            .map(|file| file.id.clone())
+            .collect()
+    }
+
+    fn remember_current_folder_view_state(&mut self) {
+        let Some(path) = self.selected_folder.as_ref().map(ItemId::as_path) else {
+            return;
+        };
+        self.folder_view_states.insert(
+            path.to_path_buf(),
+            FolderViewState {
+                selection: self.file_selection.clone(),
+                scroll_offset: self.right_scroll_offset,
+            },
+        );
+    }
+
+    fn remember_current_view_state(&mut self) {
+        self.remember_current_folder_view_state();
+        if let Some(path) = self.current_path.clone() {
+            self.root_view_states.insert(
+                path,
+                RootViewState {
+                    selection: self.folder_selection.clone(),
+                    active_folder: self.selected_folder.clone(),
+                    scroll_offset: self.left_scroll_offset,
+                },
+            );
+        }
+    }
+
+    fn start_restored_folder_scan(&mut self) {
+        let Some(selected) = self.selected_folder.clone() else {
+            return;
+        };
+        let Some(folder) = self
+            .folders
+            .iter()
+            .find(|folder| folder.id == selected)
+            .cloned()
+        else {
+            return;
+        };
+        self.folder_scan_task = Some(self.tasks.scan_folder(
+            &folder.path,
+            ScanOptions::new(self.config.show_hidden_files),
+        ));
+        self.status = format!("Loading {}...", folder.name);
     }
 
     fn process_task_events(&mut self) {
@@ -237,13 +465,27 @@ impl LuxePixApp {
                 {
                     self.root_scan_task = None;
                     self.folders = folders;
-                    if let Some(selected_id) = self.selected_folder.clone() {
-                        if !self.folders.iter().any(|folder| folder.id == selected_id) {
-                            self.selected_folder = None;
-                            self.selected_file = None;
-                            self.right_files.clear();
-                            self.right_image_paths.clear();
-                        }
+                    sort_folders(
+                        &mut self.folders,
+                        self.config.sort_field,
+                        self.config.sort_direction,
+                    );
+                    let ordered = self.ordered_folder_ids();
+                    self.folder_selection.retain(&ordered);
+                    if self
+                        .selected_folder
+                        .as_ref()
+                        .is_some_and(|selected| !ordered.contains(selected))
+                    {
+                        self.selected_folder = self.folder_selection.focus().cloned();
+                    }
+                    if self.selected_folder.is_none() {
+                        self.file_selection.clear();
+                        self.selected_file = None;
+                        self.right_files.clear();
+                        self.right_image_paths.clear();
+                    } else if self.folder_scan_task.is_none() {
+                        self.start_restored_folder_scan();
                     }
 
                     let total_imgs: usize =
@@ -268,17 +510,20 @@ impl LuxePixApp {
                 {
                     self.folder_scan_task = None;
                     self.right_files = files;
+                    sort_files(
+                        &mut self.right_files,
+                        self.config.sort_field,
+                        self.config.sort_direction,
+                    );
                     self.right_image_paths = self
                         .right_files
                         .iter()
                         .filter(|file| file.is_image)
                         .map(|file| file.path.clone())
                         .collect();
-                    if let Some(selected_id) = &self.selected_file {
-                        if !self.right_files.iter().any(|file| &file.id == selected_id) {
-                            self.selected_file = None;
-                        }
-                    }
+                    let ordered = self.ordered_file_ids();
+                    self.file_selection.retain(&ordered);
+                    self.selected_file = self.file_selection.focus().cloned();
                     let image_count = self.right_image_paths.len();
                     let other_count = self.right_files.len().saturating_sub(image_count);
                     let folder_name = self
@@ -343,17 +588,39 @@ impl LuxePixApp {
         self.right_files.iter().find(|file| &file.id == selected)
     }
 
-    fn folder_index(&self, id: &ItemId) -> Option<usize> {
-        self.folders.iter().position(|folder| &folder.id == id)
-    }
-
     fn selected_folder_path(&self) -> Option<PathBuf> {
         self.selected_folder_entry()
             .map(|folder| folder.path.clone())
     }
 
-    fn selected_file_path(&self) -> Option<PathBuf> {
-        self.selected_file_entry().map(|file| file.path.clone())
+    fn apply_current_sort(&mut self) {
+        sort_folders(
+            &mut self.folders,
+            self.config.sort_field,
+            self.config.sort_direction,
+        );
+        sort_files(
+            &mut self.right_files,
+            self.config.sort_field,
+            self.config.sort_direction,
+        );
+        self.right_image_paths = self
+            .right_files
+            .iter()
+            .filter(|file| file.is_image)
+            .map(|file| file.path.clone())
+            .collect();
+        self.folder_selection.retain(&self.ordered_folder_ids());
+        self.file_selection.retain(&self.ordered_file_ids());
+        self.selected_file = self.file_selection.focus().cloned();
+        match self.active_pane {
+            ExplorerPane::Folders => {
+                self.pending_folder_scroll_to = self.folder_selection.focus().cloned();
+            }
+            ExplorerPane::Files => {
+                self.pending_file_scroll_to = self.file_selection.focus().cloned();
+            }
+        }
     }
 
     fn scan_status(&self) -> Option<String> {
@@ -391,8 +658,10 @@ impl LuxePixApp {
                             self.selected_folder = Some(new_id.clone());
                         }
                         if self.selected_file.as_ref() == Some(&old_id) {
-                            self.selected_file = Some(new_id);
+                            self.selected_file = Some(new_id.clone());
                         }
+                        self.folder_selection.replace_id(&old_id, new_id.clone());
+                        self.file_selection.replace_id(&old_id, new_id);
                         self.refresh_current_view();
                     }
                     Err(e) => self.status = format!("Rename failed: {}", e),
@@ -409,12 +678,35 @@ impl LuxePixApp {
         }
     }
 
-    fn selected_paths(&self) -> Vec<PathBuf> {
-        if let Some(path) = self.selected_file_path() {
-            return vec![path];
+    fn open_file_with(path: &Path) {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("rundll32.exe")
+                .arg("shell32.dll,OpenAs_RunDLL")
+                .arg(path)
+                .spawn();
         }
-        if let Some(path) = self.selected_folder_path() {
-            return vec![path];
+    }
+
+    fn reveal_in_explorer(path: &Path) {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{}", path.display()))
+                .spawn();
+        }
+    }
+
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        let selection = match self.active_pane {
+            ExplorerPane::Folders => &self.folder_selection,
+            ExplorerPane::Files => &self.file_selection,
+        };
+        if !selection.is_empty() {
+            return selection
+                .ids()
+                .map(|id| id.as_path().to_path_buf())
+                .collect();
         }
         Vec::new()
     }
@@ -425,14 +717,20 @@ impl LuxePixApp {
     }
 
     fn command_context(&self) -> CommandContext {
-        let has_previewable_selection =
-            self.selected_file_entry().is_some_and(|file| file.is_image);
+        let selection_count = self.selected_paths().len();
+        let has_single_selection = match self.active_pane {
+            ExplorerPane::Folders => self.folder_selection.single().is_some(),
+            ExplorerPane::Files => self.file_selection.single().is_some(),
+        };
+        let has_previewable_selection = self.active_pane == ExplorerPane::Files
+            && self.selected_file_entry().is_some_and(|file| file.is_image);
         let has_current_path = self.current_path.is_some();
 
         CommandContext {
-            has_selection: !self.selected_paths().is_empty(),
+            has_selection: selection_count > 0,
+            has_single_selection,
             has_clipboard: self.clipboard.is_some(),
-            has_target_directory: self.active_target_dir().is_some_and(|path| path.is_dir()),
+            has_target_directory: self.active_target_dir().is_some(),
             has_current_path,
             has_items: !self.folders.is_empty() || !self.right_files.is_empty(),
             has_previewable_selection,
@@ -455,9 +753,11 @@ impl LuxePixApp {
 
     fn refresh_current_view(&mut self) {
         if let Some(path) = self.current_path.clone() {
-            self.root_scan_task = Some(self.tasks.scan_root(&path));
+            self.remember_current_view_state();
+            let options = ScanOptions::new(self.config.show_hidden_files);
+            self.root_scan_task = Some(self.tasks.scan_root(&path, options));
             if let Some(folder_path) = self.selected_folder_path() {
-                self.folder_scan_task = Some(self.tasks.scan_folder(&folder_path));
+                self.folder_scan_task = Some(self.tasks.scan_folder(&folder_path, options));
             }
             self.status = format!("Refreshing {}...", path.display());
         }
@@ -490,13 +790,14 @@ impl LuxePixApp {
             }
             CommandId::Paste => self.paste_clipboard(),
             CommandId::Rename => {
-                let target = self
-                    .selected_file_entry()
-                    .map(|file| (file.path.clone(), file.name.clone()))
-                    .or_else(|| {
-                        self.selected_folder_entry()
-                            .map(|folder| (folder.path.clone(), folder.name.clone()))
-                    });
+                let target = match self.active_pane {
+                    ExplorerPane::Folders => self
+                        .selected_folder_entry()
+                        .map(|folder| (folder.path.clone(), folder.name.clone())),
+                    ExplorerPane::Files => self
+                        .selected_file_entry()
+                        .map(|file| (file.path.clone(), file.name.clone())),
+                };
                 if let Some((original_path, new_name)) = target {
                     self.renaming = Some(RenameState {
                         original_path,
@@ -509,15 +810,51 @@ impl LuxePixApp {
                 self.pending_delete = Some(PendingDelete::Paths(paths));
             }
             CommandId::Open | CommandId::Preview => self.open_selected_item(),
+            CommandId::OpenWith => {
+                if let Some(path) = self.selected_paths().into_iter().next() {
+                    Self::open_file_with(&path);
+                }
+            }
+            CommandId::RevealInExplorer => {
+                if let Some(path) = self.selected_paths().into_iter().next() {
+                    Self::reveal_in_explorer(&path);
+                }
+            }
             CommandId::Refresh => {
                 self.thumb_mgr.clear();
                 self.refresh_current_view();
             }
             CommandId::Settings => self.open_settings(),
+            CommandId::EditAddress => {
+                if let Some(path) = &self.current_path {
+                    self.path_input = path.to_string_lossy().to_string();
+                }
+                self.path_editing = true;
+                self.show_history = false;
+            }
             CommandId::Back => self.navigate_back(),
             CommandId::Forward => self.navigate_forward(),
             CommandId::Up => self.navigate_up(),
-            CommandId::NewFolder | CommandId::SelectAll | CommandId::Undo | CommandId::Find => {
+            CommandId::SelectAll => {
+                match self.active_pane {
+                    ExplorerPane::Folders => {
+                        let ordered = self.ordered_folder_ids();
+                        self.folder_selection.select_all(&ordered);
+                        if let Some(focus) = self.folder_selection.focus().cloned() {
+                            if self.selected_folder.as_ref() != Some(&focus) {
+                                self.activate_folder(focus);
+                            }
+                        }
+                    }
+                    ExplorerPane::Files => {
+                        let ordered = self.ordered_file_ids();
+                        self.file_selection.select_all(&ordered);
+                        self.selected_file = self.file_selection.focus().cloned();
+                    }
+                }
+                self.status = format!("Selected {} item(s).", self.selected_paths().len());
+            }
+            CommandId::NewFolder | CommandId::Undo | CommandId::Find => {
                 self.status = format!(
                     "{} is registered and will be enabled with its explorer feature.",
                     command.short_label()
@@ -527,29 +864,34 @@ impl LuxePixApp {
     }
 
     fn open_selected_item(&mut self) {
-        if let Some(file) = self.selected_file_entry().cloned() {
-            if file.is_image {
-                if let Some(img_idx) = self
-                    .right_image_paths
-                    .iter()
-                    .position(|path| path == &file.path)
-                {
-                    let path = self.right_image_paths[img_idx].clone();
-                    self.full_mgr.request_full(&path);
-                    self.preview = Some(PreviewState {
-                        path,
-                        index: img_idx,
-                        zoom: 1.0,
-                        offset: egui::Vec2::ZERO,
-                    });
+        match self.active_pane {
+            ExplorerPane::Files => {
+                if let Some(file) = self.selected_file_entry().cloned() {
+                    if file.is_image {
+                        if let Some(img_idx) = self
+                            .right_image_paths
+                            .iter()
+                            .position(|path| path == &file.path)
+                        {
+                            let path = self.right_image_paths[img_idx].clone();
+                            self.full_mgr.request_full(&path);
+                            self.preview = Some(PreviewState {
+                                path,
+                                index: img_idx,
+                                zoom: 1.0,
+                                offset: egui::Vec2::ZERO,
+                            });
+                        }
+                    } else {
+                        Self::open_file_external(&file.path);
+                    }
                 }
-            } else {
-                Self::open_file_external(&file.path);
             }
-            return;
-        }
-        if let Some(path) = self.selected_folder_path() {
-            self.navigate_to(path);
+            ExplorerPane::Folders => {
+                if let Some(path) = self.selected_folder_path() {
+                    self.navigate_to(path);
+                }
+            }
         }
     }
 
@@ -646,6 +988,77 @@ impl LuxePixApp {
             }
         }
     }
+
+    fn handle_selection_navigation(&mut self, ctx: &egui::Context) {
+        if self.preview.is_some()
+            || self.renaming.is_some()
+            || self.show_settings
+            || !self.config.first_run_complete
+            || ctx.wants_keyboard_input()
+        {
+            return;
+        }
+
+        let mut escape = false;
+        let mut delta = None;
+        let mut extend = false;
+        ctx.input(|input| {
+            escape = input.key_pressed(egui::Key::Escape);
+            if input.modifiers.ctrl || input.modifiers.alt {
+                return;
+            }
+            extend = input.modifiers.shift;
+            let columns = match self.active_pane {
+                ExplorerPane::Folders => self.folder_columns.max(1),
+                ExplorerPane::Files
+                    if matches!(
+                        self.config.file_view_mode,
+                        ViewMode::Gallery | ViewMode::Grid
+                    ) =>
+                {
+                    self.file_columns.max(1)
+                }
+                ExplorerPane::Files => 1,
+            } as isize;
+            if input.key_pressed(egui::Key::ArrowLeft) {
+                delta = Some(-1);
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                delta = Some(1);
+            } else if input.key_pressed(egui::Key::ArrowUp) {
+                delta = Some(-columns);
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                delta = Some(columns);
+            }
+        });
+
+        if escape {
+            self.clear_active_selection();
+            self.status = "Selection cleared.".into();
+            return;
+        }
+        let Some(delta) = delta else {
+            return;
+        };
+
+        match self.active_pane {
+            ExplorerPane::Folders => {
+                let ordered = self.ordered_folder_ids();
+                if let Some(focus) = self.folder_selection.move_focus(&ordered, delta, extend) {
+                    self.pending_folder_scroll_to = Some(focus.clone());
+                    if self.selected_folder.as_ref() != Some(&focus) {
+                        self.activate_folder(focus);
+                    }
+                }
+            }
+            ExplorerPane::Files => {
+                let ordered = self.ordered_file_ids();
+                if let Some(focus) = self.file_selection.move_focus(&ordered, delta, extend) {
+                    self.selected_file = Some(focus.clone());
+                    self.pending_file_scroll_to = Some(focus);
+                }
+            }
+        }
+    }
 }
 
 // ── eframe::App impl ──────────────────────────────────────────
@@ -667,59 +1080,7 @@ impl eframe::App for LuxePixApp {
         }
 
         self.handle_global_shortcuts(ctx);
-
-        // ── Arrow key navigation (when not in preview and not renaming) ──
-        if self.preview.is_none()
-            && self.renaming.is_none()
-            && !self.show_settings
-            && self.config.first_run_complete
-            && !ctx.wants_keyboard_input()
-        {
-            let mut key_left = false;
-            let mut key_right = false;
-            let mut key_up = false;
-            let mut key_down = false;
-            ctx.input(|input| {
-                if !input.modifiers.any() {
-                    key_left = input.key_pressed(egui::Key::ArrowLeft);
-                    key_right = input.key_pressed(egui::Key::ArrowRight);
-                    key_up = input.key_pressed(egui::Key::ArrowUp);
-                    key_down = input.key_pressed(egui::Key::ArrowDown);
-                }
-            });
-
-            if !self.folders.is_empty() {
-                // Left pane: Left/Right = prev/next, Up/Down = row nav
-                let left_cols = ((self.config.left_panel_width - 20.0)
-                    / (self.left_thumb_size + 6.0))
-                    .max(1.0) as i32;
-
-                let mut delta: Option<i32> = None;
-                if key_left {
-                    delta = Some(-1);
-                }
-                if key_right {
-                    delta = Some(1);
-                }
-                if key_up {
-                    delta = Some(-left_cols);
-                }
-                if key_down {
-                    delta = Some(left_cols);
-                }
-
-                if let Some(d) = delta {
-                    let current = self
-                        .selected_folder
-                        .as_ref()
-                        .and_then(|id| self.folder_index(id))
-                        .unwrap_or(0) as i32;
-                    let new_idx = (current + d).clamp(0, self.folders.len() as i32 - 1) as usize;
-                    let id = self.folders[new_idx].id.clone();
-                    self.select_folder(id);
-                }
-            }
-        }
+        self.handle_selection_navigation(ctx);
 
         // ── Top command bar ──
         egui::TopBottomPanel::top("address_bar")
@@ -913,7 +1274,14 @@ impl LuxePixApp {
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::symmetric(10.0, 0.0));
 
-            let path_resp = path_frame
+            let segments = self
+                .current_path
+                .as_deref()
+                .map(breadcrumb_segments)
+                .unwrap_or_default();
+            let mut breadcrumb_target = None;
+            let mut edit_address = false;
+            let path_edit_response = path_frame
                 .show(ui, |ui| {
                     ui.set_width(path_width);
                     ui.set_height(34.0);
@@ -929,26 +1297,123 @@ impl LuxePixApp {
                             1.6,
                         );
                         ui.add_space(2.0);
-                        let resp = ui.add_sized(
-                            [ui.available_width(), 26.0],
-                            egui::TextEdit::singleline(&mut self.path_input)
-                                .hint_text("Paste or type a folder path...")
-                                .font(egui::TextStyle::Body)
-                                .frame(false)
-                                .text_color(palette.text_primary),
-                        );
-                        resp
+                        if self.path_editing {
+                            Some(
+                                ui.add_sized(
+                                    [ui.available_width(), 26.0],
+                                    egui::TextEdit::singleline(&mut self.path_input)
+                                        .hint_text("Paste or type a folder path...")
+                                        .font(egui::TextStyle::Body)
+                                        .frame(false)
+                                        .text_color(palette.text_primary),
+                                ),
+                            )
+                        } else {
+                            let breadcrumb_width = (ui.available_width() - 42.0).max(80.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(breadcrumb_width, 28.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt("address_breadcrumbs")
+                                        .max_width(breadcrumb_width)
+                                        .stick_to_right(true)
+                                        .auto_shrink([false, true])
+                                        .show(ui, |ui| {
+                                            ui.horizontal_centered(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 2.0;
+                                                if segments.is_empty() {
+                                                    ui.label(
+                                                        egui::RichText::new("Choose a folder")
+                                                            .color(palette.text_tertiary),
+                                                    );
+                                                }
+                                                for (index, (label, target)) in
+                                                    segments.iter().enumerate()
+                                                {
+                                                    if index > 0 {
+                                                        let chevron = ui
+                                                            .allocate_exact_size(
+                                                                egui::vec2(12.0, 16.0),
+                                                                egui::Sense::hover(),
+                                                            )
+                                                            .0;
+                                                        draw_icon(
+                                                            ui.painter(),
+                                                            IconKind::ChevronRight,
+                                                            chevron.shrink(2.0),
+                                                            palette.text_tertiary,
+                                                            1.4,
+                                                        );
+                                                    }
+                                                    let text = egui::RichText::new(label)
+                                                        .size(12.5)
+                                                        .color(if index + 1 == segments.len() {
+                                                            palette.text_primary
+                                                        } else {
+                                                            palette.text_secondary
+                                                        });
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(text)
+                                                                .frame(false)
+                                                                .min_size(egui::vec2(0.0, 24.0)),
+                                                        )
+                                                        .on_hover_text(target.display().to_string())
+                                                        .clicked()
+                                                    {
+                                                        breadcrumb_target = Some(target.clone());
+                                                    }
+                                                }
+                                            });
+                                        });
+                                },
+                            );
+                            edit_address = icon_button(
+                                ui,
+                                IconKind::Edit,
+                                None,
+                                "Edit address (Ctrl+L)",
+                                false,
+                                &palette,
+                            )
+                            .clicked();
+                            None
+                        }
                     })
                     .inner
                 })
                 .inner;
 
-            if path_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                let p = PathBuf::from(&self.path_input);
-                if p.is_dir() {
-                    self.navigate_to(p);
-                } else {
-                    self.status = format!("Path not found or not accessible: {}", self.path_input);
+            if let Some(path_resp) = path_edit_response {
+                if !path_resp.has_focus() && !path_resp.lost_focus() {
+                    path_resp.request_focus();
+                }
+                let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                if enter {
+                    let path = PathBuf::from(self.path_input.trim());
+                    if path.is_dir() {
+                        self.navigate_to(path);
+                    } else {
+                        self.status =
+                            format!("Path not found or not accessible: {}", self.path_input);
+                    }
+                } else if escape || path_resp.lost_focus() {
+                    self.path_input = self
+                        .current_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.path_editing = false;
+                }
+            }
+            if edit_address {
+                self.execute_command(CommandId::EditAddress);
+            }
+            if let Some(target) = breadcrumb_target {
+                if self.current_path.as_ref() != Some(&target) {
+                    self.navigate_to(target);
                 }
             }
 
@@ -1228,6 +1693,7 @@ impl LuxePixApp {
         let mut import_shortcuts = false;
         let mut export_shortcuts = false;
         let mut config_changed = false;
+        let mut hidden_files_changed = false;
         let mut close_window = false;
 
         egui::Window::new("Settings")
@@ -1364,9 +1830,10 @@ impl LuxePixApp {
                         }
                         SettingsTab::FileOperations => {
                             settings_heading(ui, "File Operations", &palette);
-                            config_changed |= ui
+                            hidden_files_changed |= ui
                                 .checkbox(&mut self.config.show_hidden_files, "Show hidden files")
                                 .changed();
+                            config_changed |= hidden_files_changed;
                             config_changed |= ui
                                 .checkbox(
                                     &mut self.config.confirm_permanent_delete,
@@ -1452,6 +1919,9 @@ impl LuxePixApp {
             if let Err(error) = self.config.save() {
                 self.status = format!("Could not save settings: {error}");
             }
+        }
+        if hidden_files_changed {
+            self.refresh_current_view();
         }
 
         if close_window {
@@ -1636,7 +2106,9 @@ impl LuxePixApp {
     }
 
     fn render_file_action_bar(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        if self.selected_file.is_none() && self.clipboard.is_none() {
+        if (self.active_pane != ExplorerPane::Files || self.file_selection.is_empty())
+            && self.clipboard.is_none()
+        {
             return;
         }
 
@@ -1645,10 +2117,14 @@ impl LuxePixApp {
             .inner_margin(egui::Margin::symmetric(18.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let selected_label = self
-                        .selected_file_entry()
-                        .map(|file| truncate_str(&file.name, 34))
-                        .unwrap_or_else(|| "Clipboard ready".into());
+                    let selected_label = match self.file_selection.len() {
+                        0 => "Clipboard ready".into(),
+                        1 => self
+                            .selected_file_entry()
+                            .map(|file| truncate_str(&file.name, 34))
+                            .unwrap_or_else(|| "1 item selected".into()),
+                        count => format!("{count} items selected"),
+                    };
                     ui.label(
                         egui::RichText::new(selected_label)
                             .size(12.0)
@@ -1678,6 +2154,24 @@ impl LuxePixApp {
                             self.execute_command(command);
                         }
                     }
+                    ui.menu_button("More", |ui| {
+                        for command in [
+                            CommandId::OpenWith,
+                            CommandId::RevealInExplorer,
+                            CommandId::DeletePermanent,
+                        ] {
+                            if ui
+                                .add_enabled(
+                                    self.command_enabled(command),
+                                    egui::Button::new(command.short_label()),
+                                )
+                                .clicked()
+                            {
+                                self.execute_command(command);
+                                ui.close_menu();
+                            }
+                        }
+                    });
                 });
             });
     }
@@ -1707,31 +2201,38 @@ impl LuxePixApp {
         }
 
         let thumb_size = self.left_thumb_size;
-        let selected = self.selected_folder.clone();
-        let mut new_select: Option<ItemId> = None;
-        let mut start_rename: Option<(PathBuf, String)> = None;
         let mut commit_rename = false;
         let mut cancel_rename = false;
         let mut context_command: Option<CommandId> = None;
-        let mut menu_context = self.command_context();
-        menu_context.has_selection = true;
-        menu_context.has_target_directory = true;
-
         let renaming_path = self.renaming.as_ref().map(|r| r.original_path.clone());
+        let folders = self.folders.clone();
+        let mut item_rects = Vec::with_capacity(folders.len());
+        let mut open_folder = None;
+        let pending_scroll = self.pending_folder_scroll_to.clone();
+        let tile_width = thumb_size.clamp(116.0, 360.0);
+        self.folder_columns = ((ui.available_width() + 12.0) / (tile_width + 12.0))
+            .floor()
+            .max(1.0) as usize;
 
-        egui::ScrollArea::vertical()
+        let output = egui::ScrollArea::vertical()
+            .id_salt("folder_gallery")
+            .vertical_scroll_offset(self.left_scroll_offset)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(16.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
 
-                    for folder in &self.folders {
-                        let tile_w = thumb_size.clamp(116.0, 360.0);
+                    for folder in &folders {
+                        let tile_w = tile_width;
                         let thumb_h = (tile_w * 0.75).max(86.0);
                         let tile_h = thumb_h + 58.0;
                         let (rect, tile_resp) = ui
                             .allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
+                        item_rects.push((folder.id.clone(), rect));
+                        if pending_scroll.as_ref() == Some(&folder.id) {
+                            tile_resp.scroll_to_me(Some(egui::Align::Center));
+                        }
 
                         if !ui.is_rect_visible(rect) {
                             if let Some(ref p) = folder.first_image {
@@ -1744,7 +2245,7 @@ impl LuxePixApp {
                             self.thumb_mgr.request_thumbnail(p, thumb_size as u32);
                         }
 
-                        let is_sel = selected.as_ref() == Some(&folder.id);
+                        let is_sel = self.folder_selection.contains(&folder.id);
                         paint_tile_shell(ui, rect, is_sel, tile_resp.hovered(), &palette);
 
                         let t_rect =
@@ -1777,15 +2278,46 @@ impl LuxePixApp {
                             );
                         }
 
-                        if thumb_resp.clicked() || tile_resp.clicked() {
-                            new_select = Some(folder.id.clone());
+                        let checkbox_clicked = if self.config.show_selection_checkboxes {
+                            explorer::selection_checkbox(
+                                ui,
+                                egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(8.0, 8.0),
+                                    egui::vec2(19.0, 19.0),
+                                ),
+                                is_sel,
+                                &palette,
+                                ("folder_check", &folder.id),
+                            )
+                            .clicked()
+                        } else {
+                            false
+                        };
+                        if thumb_resp.double_clicked() || tile_resp.double_clicked() {
+                            self.folder_selection.replace(folder.id.clone());
+                            self.selected_folder = Some(folder.id.clone());
+                            self.active_pane = ExplorerPane::Folders;
+                            open_folder = Some(folder.path.clone());
+                        } else if checkbox_clicked {
+                            self.select_folder_with_modifiers(
+                                folder.id.clone(),
+                                egui::Modifiers {
+                                    ctrl: true,
+                                    ..Default::default()
+                                },
+                            );
+                        } else if thumb_resp.clicked() || tile_resp.clicked() {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            self.select_folder_with_modifiers(folder.id.clone(), modifiers);
                         }
                         if thumb_resp.secondary_clicked() || tile_resp.secondary_clicked() {
-                            new_select = Some(folder.id.clone());
+                            self.select_folder_for_context(folder.id.clone());
                         }
+                        let menu_context = self.command_context();
                         tile_resp.context_menu(|ui| {
                             for command in [
                                 CommandId::Open,
+                                CommandId::RevealInExplorer,
                                 CommandId::Copy,
                                 CommandId::Cut,
                                 CommandId::Paste,
@@ -1801,6 +2333,16 @@ impl LuxePixApp {
                                     context_command = Some(command);
                                     ui.close_menu();
                                 }
+                            }
+                            ui.separator();
+                            if context_menu_command(
+                                ui,
+                                CommandId::DeletePermanent,
+                                menu_context,
+                                self.config.shortcuts.get(CommandId::DeletePermanent),
+                            ) {
+                                context_command = Some(CommandId::DeletePermanent);
+                                ui.close_menu();
                             }
                         });
 
@@ -1828,25 +2370,13 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            let name_resp = ui.interact(
-                                name_rect,
-                                ui.id().with(("ln", &folder.id)),
-                                egui::Sense::click(),
-                            );
                             ui.painter().text(
                                 name_rect.left_center(),
                                 egui::Align2::LEFT_CENTER,
                                 truncate_str(&folder.name, 28),
                                 egui::FontId::proportional(13.0),
-                                if name_resp.hovered() {
-                                    palette.accent
-                                } else {
-                                    palette.text_primary
-                                },
+                                palette.text_primary,
                             );
-                            if name_resp.clicked() {
-                                start_rename = Some((folder.path.clone(), folder.name.clone()));
-                            }
                         }
 
                         let pill_rect = egui::Rect::from_min_size(
@@ -1866,15 +2396,35 @@ impl LuxePixApp {
                 });
                 ui.add_space(20.0);
             });
-
-        if let Some(id) = new_select {
-            self.select_folder(id);
+        self.left_scroll_offset = output.state.offset.y;
+        let finished_marquee = explorer::update_marquee_selection(
+            ui,
+            output.inner_rect,
+            &item_rects,
+            &mut self.folder_selection,
+            &mut self.folder_marquee,
+            &palette,
+        );
+        if self.folder_marquee.is_some() || finished_marquee {
+            self.active_pane = ExplorerPane::Folders;
         }
-        if let Some((path, name)) = start_rename {
-            self.renaming = Some(RenameState {
-                original_path: path,
-                new_name: name,
-            });
+        if finished_marquee {
+            if let Some(focus) = self.folder_selection.focus().cloned() {
+                if self.selected_folder.as_ref() != Some(&focus) {
+                    self.activate_folder(focus);
+                }
+            } else {
+                self.clear_active_folder();
+            }
+        }
+        if pending_scroll
+            .as_ref()
+            .is_some_and(|id| folders.iter().any(|folder| &folder.id == id))
+        {
+            self.pending_folder_scroll_to = None;
+        }
+        if let Some(path) = open_folder {
+            self.navigate_to(path);
         }
         if commit_rename {
             self.execute_rename();
@@ -1902,6 +2452,7 @@ impl LuxePixApp {
             &mut self.right_thumb_size,
             80.0..=500.0,
         );
+        self.render_explorer_toolbar(ui, &palette);
         self.render_file_action_bar(ui, &palette);
 
         if self.right_files.is_empty() {
@@ -1915,34 +2466,47 @@ impl LuxePixApp {
             return;
         }
 
+        if self.config.file_view_mode != ViewMode::Gallery {
+            self.render_alternate_file_view(ui, &palette);
+            return;
+        }
+
         let thumb_size = self.right_thumb_size;
         let mut open_preview: Option<usize> = None;
         let mut open_external: Option<PathBuf> = None;
-        let mut start_rename: Option<(PathBuf, String)> = None;
         let mut commit_rename = false;
         let mut cancel_rename = false;
         let mut context_command: Option<CommandId> = None;
-        let mut menu_context = self.command_context();
-        menu_context.has_selection = true;
 
         let renaming_path = self.renaming.as_ref().map(|r| r.original_path.clone());
+        let files = self.right_files.clone();
+        let mut item_rects = Vec::with_capacity(files.len());
+        let pending_scroll = self.pending_file_scroll_to.clone();
+        let tile_width = thumb_size.clamp(160.0, 420.0);
+        self.file_columns = ((ui.available_width() + 14.0) / (tile_width + 14.0))
+            .floor()
+            .max(1.0) as usize;
 
-        egui::ScrollArea::vertical()
+        let output = egui::ScrollArea::vertical()
+            .id_salt("file_gallery")
+            .vertical_scroll_offset(self.right_scroll_offset)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(12.0);
-                if img_count > 0 {
-                    render_section_label(ui, &palette, "Images", img_count);
-                }
+                render_section_label(ui, &palette, "Items", files.len());
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
 
-                    for file in &self.right_files {
-                        let tile_w = thumb_size.clamp(120.0, 420.0);
+                    for file in &files {
+                        let tile_w = tile_width;
                         let info_h = 48.0;
                         let tile_h = tile_w + info_h;
                         let (rect, tile_resp) = ui
                             .allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
+                        item_rects.push((file.id.clone(), rect));
+                        if pending_scroll.as_ref() == Some(&file.id) {
+                            tile_resp.scroll_to_me(Some(egui::Align::Center));
+                        }
 
                         if !ui.is_rect_visible(rect) {
                             if file.is_image {
@@ -1952,7 +2516,7 @@ impl LuxePixApp {
                             continue;
                         }
 
-                        let is_selected = self.selected_file.as_ref() == Some(&file.id);
+                        let is_selected = self.file_selection.contains(&file.id);
                         paint_tile_shell(ui, rect, is_selected, tile_resp.hovered(), &palette);
 
                         let t_rect =
@@ -1978,10 +2542,10 @@ impl LuxePixApp {
                                 );
                             }
 
-                            if thumb_resp.clicked() || tile_resp.clicked() {
-                                self.selected_file = Some(file.id.clone());
-                            }
                             if thumb_resp.double_clicked() || tile_resp.double_clicked() {
+                                self.file_selection.replace(file.id.clone());
+                                self.selected_file = Some(file.id.clone());
+                                self.active_pane = ExplorerPane::Files;
                                 if let Some(img_idx) =
                                     self.right_image_paths.iter().position(|p| p == &file.path)
                                 {
@@ -1990,20 +2554,50 @@ impl LuxePixApp {
                             }
                         } else {
                             paint_file_placeholder(ui, t_rect.shrink(1.0), file, &palette);
-                            if thumb_resp.clicked() || tile_resp.clicked() {
-                                self.selected_file = Some(file.id.clone());
-                            }
                             if thumb_resp.double_clicked() || tile_resp.double_clicked() {
+                                self.file_selection.replace(file.id.clone());
+                                self.selected_file = Some(file.id.clone());
+                                self.active_pane = ExplorerPane::Files;
                                 open_external = Some(file.path.clone());
                             }
                         }
 
-                        if tile_resp.secondary_clicked() || thumb_resp.secondary_clicked() {
-                            self.selected_file = Some(file.id.clone());
+                        let checkbox_clicked = if self.config.show_selection_checkboxes {
+                            explorer::selection_checkbox(
+                                ui,
+                                egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(8.0, 8.0),
+                                    egui::vec2(19.0, 19.0),
+                                ),
+                                is_selected,
+                                &palette,
+                                ("gallery_check", &file.id),
+                            )
+                            .clicked()
+                        } else {
+                            false
+                        };
+                        if checkbox_clicked {
+                            self.select_file_with_modifiers(
+                                file.id.clone(),
+                                egui::Modifiers {
+                                    ctrl: true,
+                                    ..Default::default()
+                                },
+                            );
+                        } else if thumb_resp.clicked() || tile_resp.clicked() {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            self.select_file_with_modifiers(file.id.clone(), modifiers);
                         }
+                        if tile_resp.secondary_clicked() || thumb_resp.secondary_clicked() {
+                            self.select_file_for_context(file.id.clone());
+                        }
+                        let menu_context = self.command_context();
                         tile_resp.context_menu(|ui| {
                             for command in [
                                 CommandId::Open,
+                                CommandId::OpenWith,
+                                CommandId::RevealInExplorer,
                                 CommandId::Copy,
                                 CommandId::Cut,
                                 CommandId::Paste,
@@ -2019,6 +2613,16 @@ impl LuxePixApp {
                                     context_command = Some(command);
                                     ui.close_menu();
                                 }
+                            }
+                            ui.separator();
+                            if context_menu_command(
+                                ui,
+                                CommandId::DeletePermanent,
+                                menu_context,
+                                self.config.shortcuts.get(CommandId::DeletePermanent),
+                            ) {
+                                context_command = Some(CommandId::DeletePermanent);
+                                ui.close_menu();
                             }
                         });
 
@@ -2046,25 +2650,13 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            let name_resp = ui.interact(
-                                name_rect,
-                                ui.id().with(("rn", &file.id)),
-                                egui::Sense::click(),
-                            );
                             ui.painter().text(
                                 name_rect.left_center(),
                                 egui::Align2::LEFT_CENTER,
                                 truncate_str(&file.name, 30),
                                 egui::FontId::proportional(12.5),
-                                if name_resp.hovered() {
-                                    palette.accent
-                                } else {
-                                    palette.text_primary
-                                },
+                                palette.text_primary,
                             );
-                            if name_resp.clicked() {
-                                start_rename = Some((file.path.clone(), file.name.clone()));
-                            }
                         }
 
                         let meta = if file.is_image {
@@ -2095,6 +2687,25 @@ impl LuxePixApp {
                 });
                 ui.add_space(20.0);
             });
+        self.right_scroll_offset = output.state.offset.y;
+        let finished_marquee = explorer::update_marquee_selection(
+            ui,
+            output.inner_rect,
+            &item_rects,
+            &mut self.file_selection,
+            &mut self.file_marquee,
+            &palette,
+        );
+        if self.file_marquee.is_some() || finished_marquee {
+            self.active_pane = ExplorerPane::Files;
+            self.selected_file = self.file_selection.focus().cloned();
+        }
+        if pending_scroll
+            .as_ref()
+            .is_some_and(|id| files.iter().any(|file| &file.id == id))
+        {
+            self.pending_file_scroll_to = None;
+        }
 
         // Open preview for clicked image
         if let Some(img_idx) = open_preview {
@@ -2115,13 +2726,6 @@ impl LuxePixApp {
             Self::open_file_external(&path);
         }
 
-        // Start rename
-        if let Some((path, name)) = start_rename {
-            self.renaming = Some(RenameState {
-                original_path: path,
-                new_name: name,
-            });
-        }
         if commit_rename {
             self.execute_rename();
         } else if cancel_rename {
@@ -2508,6 +3112,7 @@ enum IconKind {
     File,
     Archive,
     Info,
+    Edit,
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
@@ -3197,7 +3802,56 @@ fn draw_icon(
             painter.circle_filled(p(12.0, 8.0), rect.width() * 1.0 / 24.0, color);
             painter.line_segment([p(12.0, 11.0), p(12.0, 17.0)], stroke);
         }
+        IconKind::Edit => {
+            painter.add(egui::Shape::line(
+                vec![
+                    p(5.0, 19.0),
+                    p(8.5, 18.0),
+                    p(19.0, 7.5),
+                    p(16.5, 5.0),
+                    p(6.0, 15.5),
+                    p(5.0, 19.0),
+                ],
+                stroke,
+            ));
+            painter.line_segment([p(14.5, 7.0), p(17.0, 9.5)], stroke);
+        }
     }
+}
+
+fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
+    let mut segments: Vec<(String, PathBuf)> = Vec::new();
+    let mut accumulated = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                accumulated.push(prefix.as_os_str());
+                segments.push((
+                    prefix.as_os_str().to_string_lossy().to_string(),
+                    accumulated.clone(),
+                ));
+            }
+            Component::RootDir => {
+                accumulated.push(component.as_os_str());
+                if let Some((label, target)) = segments.last_mut() {
+                    if !label.ends_with(std::path::MAIN_SEPARATOR) {
+                        label.push(std::path::MAIN_SEPARATOR);
+                    }
+                    *target = accumulated.clone();
+                } else {
+                    segments.push((std::path::MAIN_SEPARATOR.to_string(), accumulated.clone()));
+                }
+            }
+            Component::Normal(value) => {
+                accumulated.push(value);
+                segments.push((value.to_string_lossy().to_string(), accumulated.clone()));
+            }
+            Component::CurDir | Component::ParentDir => {}
+        }
+    }
+
+    segments
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -3619,5 +4273,39 @@ fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
                 )
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::breadcrumb_segments;
+    use std::path::PathBuf;
+
+    #[test]
+    fn breadcrumbs_accumulate_clickable_parent_paths() {
+        let path = PathBuf::from("Products").join("Nails").join("2026");
+        let segments = breadcrumb_segments(&path);
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Products", "Nails", "2026"]
+        );
+        assert_eq!(segments[0].1, PathBuf::from("Products"));
+        assert_eq!(segments[1].1, PathBuf::from("Products").join("Nails"));
+        assert_eq!(segments[2].1, path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_root_is_one_breadcrumb_segment() {
+        let segments = breadcrumb_segments(std::path::Path::new(r"C:\Products\Nails"));
+
+        assert_eq!(segments[0].0, r"C:\");
+        assert_eq!(segments[0].1, PathBuf::from(r"C:\"));
+        assert_eq!(segments[1].0, "Products");
+        assert_eq!(segments[2].0, "Nails");
     }
 }

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ItemId(PathBuf);
 
@@ -25,6 +27,60 @@ impl From<&Path> for ItemId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    #[default]
+    Gallery,
+    Grid,
+    Compact,
+    Details,
+}
+
+impl ViewMode {
+    pub const ALL: [Self; 4] = [Self::Gallery, Self::Grid, Self::Compact, Self::Details];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Gallery => "Gallery",
+            Self::Grid => "Grid",
+            Self::Compact => "Compact",
+            Self::Details => "Details",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortField {
+    #[default]
+    Name,
+    Modified,
+    Size,
+    Type,
+}
+
+impl SortField {
+    pub const ALL: [Self; 4] = [Self::Name, Self::Modified, Self::Size, Self::Type];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Modified => "Modified",
+            Self::Size => "Size",
+            Self::Type => "Type",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
 #[derive(Clone, Debug)]
 pub struct FolderEntry {
     pub id: ItemId,
@@ -33,6 +89,8 @@ pub struct FolderEntry {
     pub first_image: Option<PathBuf>,
     pub image_count: usize,
     pub total_files: usize,
+    pub size_bytes: u64,
+    pub modified_unix: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +101,7 @@ pub struct FileEntry {
     pub is_image: bool,
     pub extension: String,
     pub size_bytes: u64,
+    pub modified_unix: u64,
 }
 
 #[cfg(test)]
