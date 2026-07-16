@@ -1,0 +1,22 @@
+/target/
+/dist/
+/.omx/
+/.vscode/
+
+# Local application state and generated packages
+/data/
+/models/
+/installer/Output/
+luxepix_config.json
+.design-canvas.state.json
+.portable
+*.bak
+*.pdb
+*.zip
+*.exe
+
+# Temporary updater and test artifacts
+*.tmp
+*.part
+*.old
+update-success-*

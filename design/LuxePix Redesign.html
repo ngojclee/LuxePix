@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>LuxePix — Desktop UI Redesign</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;650;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="tokens.css" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #f0eee9; }
+  /* Make every artboard render its app shell at full width/height */
+  [data-dc-slot] .lp-app { width: 100% !important; height: 100% !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+
+<script type="text/babel">
+  const W = 1400;
+  const H = 900;
+
+  function App() {
+    return (
+      <DesignCanvas>
+        <DCSection id="main" title="Main browsing screen" subtitle="The default screen — folder tray, content tray, status bar.">
+          <DCArtboard id="light" label="01 · Light theme" width={W} height={H}>
+            <AppShell
+              theme="light"
+              statusKind="info"
+              statusMsg="Scanned 248 images and 4 other files in Client Shoots · 1.2s"
+            />
+          </DCArtboard>
+          <DCArtboard id="dark" label="02 · Dark theme" width={W} height={H}>
+            <AppShell
+              theme="dark"
+              statusKind="info"
+              statusMsg="Scanned 248 images and 4 other files in Client Shoots · 1.2s"
+            />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="preview" title="Preview lightbox" subtitle="Full-window overlay with image, controls and info bar. Esc closes, arrows navigate, wheel zooms.">
+          <DCArtboard id="lightbox-loaded" label="03a · Loaded · middle of set" width={W} height={H}>
+            <AppShell
+              theme="light"
+              statusKind="info"
+              statusMsg="Previewing DSC_4823.NEF.jpg"
+              lightbox={{ idx: 47, total: 248 }}
+            />
+          </DCArtboard>
+          <DCArtboard id="lightbox-loading" label="03b · Loading state" width={W} height={H}>
+            <AppShell
+              theme="light"
+              statusKind="info"
+              statusMsg="Loading DSC_4823.NEF.jpg…"
+              lightbox={{ loading: true, idx: 47, total: 248 }}
+            />
+          </DCArtboard>
+          <DCArtboard id="lightbox-first" label="03c · First image · prev disabled" width={W} height={H}>
+            <AppShell
+              theme="dark"
+              statusKind="info"
+              statusMsg="Previewing DSC_4776.NEF.jpg"
+              lightbox={{ first: true, idx: 1, total: 248 }}
+            />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="empty" title="Initial & empty states" subtitle="Before a path is selected, and edge cases like invalid path / no subfolders.">
+          <DCArtboard id="initial" label="04a · Initial · no path" width={W} height={H}>
+            <InitialState theme="light" />
+          </DCArtboard>
+          <DCArtboard id="invalid" label="04b · Invalid path" width={W} height={H}>
+            <div className="lp-app" data-theme="light" style={{ width: "100%", height: "100%" }}>
+              <TopBar path="D:/Photography/2026/Old Shoots" theme="light" />
+              <div className="lp-banner is-error">
+                <LpIcon name="alert" s={16} />
+                <div className="lp-banner-text">
+                  <strong>Path not found.</strong>&nbsp;
+                  <span style={{ color: "var(--text-secondary)" }}>
+                    D:/Photography/2026/Old Shoots doesn't exist or isn't accessible.
+                  </span>
+                </div>
+              </div>
+              <div className="lp-body">
+                <div className="lp-folder-pane">
+                  <div className="lp-pane-header">
+                    <div>
+                      <div className="lp-pane-title">Folders</div>
+                      <div className="lp-pane-meta lp-num">— folders <span className="lp-meta-dot" /> — images</div>
+                    </div>
+                  </div>
+                  <div className="lp-empty" style={{ padding: 32 }}>
+                    <div className="lp-empty-art" style={{ width: 64, height: 64, borderRadius: 14, marginBottom: 14 }}>
+                      <LpIcon name="folder" s={26} />
+                    </div>
+                    <div className="lp-empty-title" style={{ fontSize: 14 }}>No folders to show</div>
+                    <div className="lp-empty-sub" style={{ fontSize: 12.5 }}>The path above couldn't be opened. Check the path or pick a different one.</div>
+                  </div>
+                </div>
+                <div className="lp-content-pane">
+                  <div className="lp-empty">
+                    <div className="lp-empty-art"><LpIcon name="alert" s={36} /></div>
+                    <div className="lp-empty-title">We couldn't open that folder</div>
+                    <div className="lp-empty-sub">Double-check the path, or browse to a folder you can read. LuxePix only scans local paths.</div>
+                    <div className="lp-empty-row">
+                      <button className="lp-iconbtn is-primary"><LpIcon name="folder-open" s={14} /><span className="lp-iconbtn-label">Browse for folder</span></button>
+                      <button className="lp-iconbtn"><LpIcon name="history" s={14} /><span className="lp-iconbtn-label">Recent paths</span></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <StatusBar kind="error" message='Path "D:/Photography/2026/Old Shoots" not found.' />
+            </div>
+          </DCArtboard>
+          <DCArtboard id="nofiles" label="04c · No files in selected folder" width={W} height={H}>
+            <div className="lp-app" data-theme="light" style={{ width: "100%", height: "100%" }}>
+              <TopBar path="D:/Photography/2026/Client Shoots" theme="light" />
+              <div className="lp-body">
+                <FolderPane />
+                <div className="lp-content-pane">
+                  <div className="lp-pane-header">
+                    <div>
+                      <div className="lp-pane-title">Studio Tests</div>
+                      <div className="lp-pane-meta lp-num">0 images <span className="lp-meta-dot" /> 0 other files</div>
+                    </div>
+                    <div className="lp-pane-spacer" />
+                  </div>
+                  <div className="lp-empty">
+                    <div className="lp-empty-art"><LpIcon name="image" s={38} /></div>
+                    <div className="lp-empty-title">This folder is empty</div>
+                    <div className="lp-empty-sub">There are no images or other files in <span className="lp-num">Studio Tests</span>. Drop files in to see them here.</div>
+                  </div>
+                </div>
+              </div>
+              <StatusBar kind="info" message="Studio Tests has no files." />
+            </div>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="interaction" title="History dropdown + inline rename" subtitle="Two interaction details: recent paths popover open, and a folder/file tile mid-rename.">
+          <DCArtboard id="interaction-detail" label="05 · History open · folder rename" width={W} height={H}>
+            <AppShell
+              theme="light"
+              statusKind="success"
+              statusMsg='Renamed "Studio Tests" → "Studio Tests · Q2"'
+              renamingFolder={7}
+              renamingFile={2}
+              historyOpen={true}
+            />
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
