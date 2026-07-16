@@ -3,8 +3,10 @@ use std::{fs, io};
 
 use eframe::egui;
 
+use crate::commands::{CommandContext, CommandId};
 use crate::config::{AppConfig, ShortcutConfig};
 use crate::scanner::{self, format_size, FileEntry, FolderEntry};
+use crate::storage::{transactional_write, StoragePaths};
 use crate::thumbs::ThumbManager;
 
 // ── Preview state ──────────────────────────────────────────────
@@ -38,9 +40,14 @@ pub struct LuxePixApp {
     renaming: Option<RenameState>,
 
     // Config & history
+    storage: StoragePaths,
     config: AppConfig,
+    effective_theme: String,
     show_history: bool,
     show_settings: bool,
+    settings_tab: SettingsTab,
+    shortcut_draft: ShortcutConfig,
+    shortcut_capture: Option<CommandId>,
     clipboard: Option<FileClipboard>,
     pending_delete: Option<PendingDelete>,
 
@@ -67,20 +74,49 @@ enum PendingDelete {
     Paths(Vec<PathBuf>),
 }
 
-#[derive(Clone, Copy)]
-enum FileCommand {
-    Copy,
-    Cut,
-    Paste,
-    Rename,
-    Delete,
-    Open,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsTab {
+    General,
+    Appearance,
+    Shortcuts,
+    SearchIndex,
+    FileOperations,
+    Advanced,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Appearance,
+        Self::Shortcuts,
+        Self::SearchIndex,
+        Self::FileOperations,
+        Self::Advanced,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Appearance => "Appearance",
+            Self::Shortcuts => "Shortcuts",
+            Self::SearchIndex => "Search & Index",
+            Self::FileOperations => "File Operations",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
+
+enum CapturedShortcut {
+    Cancel,
+    Value(String),
 }
 
 impl LuxePixApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        let config = AppConfig::load();
-        apply_theme(&cc.egui_ctx, &config.theme);
+        let storage = StoragePaths::detect();
+        let config = AppConfig::load(&storage);
+        let effective_theme = apply_theme(&cc.egui_ctx, &config.theme).to_string();
+        let shortcut_draft = config.shortcuts.clone();
 
         let mut app = Self {
             path_input: String::new(),
@@ -96,9 +132,14 @@ impl LuxePixApp {
             thumb_mgr: ThumbManager::new(3000, 4),
             full_mgr: ThumbManager::new(5, 2),
             renaming: None,
+            storage,
             config,
+            effective_theme,
             show_history: false,
             show_settings: false,
+            settings_tab: SettingsTab::General,
+            shortcut_draft,
+            shortcut_capture: None,
             clipboard: None,
             pending_delete: None,
             status: "Ready. Pick a folder above or choose a recent path.".into(),
@@ -234,6 +275,39 @@ impl LuxePixApp {
             .or_else(|| self.current_path.clone())
     }
 
+    fn command_context(&self) -> CommandContext {
+        let has_previewable_selection = self
+            .selected_file
+            .and_then(|idx| self.right_files.get(idx))
+            .is_some_and(|file| file.is_image);
+        let has_current_path = self.current_path.is_some();
+
+        CommandContext {
+            has_selection: !self.selected_paths().is_empty(),
+            has_clipboard: self.clipboard.is_some(),
+            has_target_directory: self.active_target_dir().is_some_and(|path| path.is_dir()),
+            has_current_path,
+            has_items: !self.folders.is_empty() || !self.right_files.is_empty(),
+            has_previewable_selection,
+            can_navigate_up: self
+                .current_path
+                .as_deref()
+                .and_then(Path::parent)
+                .is_some(),
+            ..CommandContext::default()
+        }
+    }
+
+    fn command_enabled(&self, command: CommandId) -> bool {
+        command.enabled(self.command_context())
+    }
+
+    fn open_settings(&mut self) {
+        self.shortcut_draft = self.config.shortcuts.clone();
+        self.shortcut_capture = None;
+        self.show_settings = true;
+    }
+
     fn refresh_current_view(&mut self) {
         if let Some(path) = self.current_path.clone() {
             let selected_folder_path = self
@@ -254,36 +328,33 @@ impl LuxePixApp {
         }
     }
 
-    fn execute_file_command(&mut self, command: FileCommand) {
+    fn execute_command(&mut self, command: CommandId) {
+        if !self.command_enabled(command) {
+            self.status = format!("{} is not available right now.", command.short_label());
+            return;
+        }
+
         match command {
-            FileCommand::Copy => {
+            CommandId::Copy => {
                 let paths = self.selected_paths();
-                if paths.is_empty() {
-                    self.status = "Select a file or folder first.".into();
-                } else {
-                    let count = paths.len();
-                    self.clipboard = Some(FileClipboard {
-                        paths,
-                        mode: ClipboardMode::Copy,
-                    });
-                    self.status = format!("Copied {} item(s) to LuxePix clipboard.", count);
-                }
+                let count = paths.len();
+                self.clipboard = Some(FileClipboard {
+                    paths,
+                    mode: ClipboardMode::Copy,
+                });
+                self.status = format!("Copied {} item(s) to LuxePix clipboard.", count);
             }
-            FileCommand::Cut => {
+            CommandId::Cut => {
                 let paths = self.selected_paths();
-                if paths.is_empty() {
-                    self.status = "Select a file or folder first.".into();
-                } else {
-                    let count = paths.len();
-                    self.clipboard = Some(FileClipboard {
-                        paths,
-                        mode: ClipboardMode::Cut,
-                    });
-                    self.status = format!("Cut {} item(s). Paste to move.", count);
-                }
+                let count = paths.len();
+                self.clipboard = Some(FileClipboard {
+                    paths,
+                    mode: ClipboardMode::Cut,
+                });
+                self.status = format!("Cut {} item(s). Paste to move.", count);
             }
-            FileCommand::Paste => self.paste_clipboard(),
-            FileCommand::Rename => {
+            CommandId::Paste => self.paste_clipboard(),
+            CommandId::Rename => {
                 if let Some(idx) = self.selected_file {
                     if let Some(file) = self.right_files.get(idx) {
                         self.renaming = Some(RenameState {
@@ -298,19 +369,31 @@ impl LuxePixApp {
                             new_name: folder.name.clone(),
                         });
                     }
-                } else {
-                    self.status = "Select a file or folder first.".into();
                 }
             }
-            FileCommand::Delete => {
+            CommandId::Delete | CommandId::DeletePermanent => {
                 let paths = self.selected_paths();
-                if paths.is_empty() {
-                    self.status = "Select a file or folder first.".into();
-                } else {
-                    self.pending_delete = Some(PendingDelete::Paths(paths));
-                }
+                self.pending_delete = Some(PendingDelete::Paths(paths));
             }
-            FileCommand::Open => self.open_selected_item(),
+            CommandId::Open | CommandId::Preview => self.open_selected_item(),
+            CommandId::Refresh => {
+                self.thumb_mgr.clear();
+                self.refresh_current_view();
+                self.status = "View refreshed.".into();
+            }
+            CommandId::Settings => self.open_settings(),
+            CommandId::NewFolder
+            | CommandId::SelectAll
+            | CommandId::Undo
+            | CommandId::Find
+            | CommandId::Back
+            | CommandId::Forward
+            | CommandId::Up => {
+                self.status = format!(
+                    "{} is registered and will be enabled with its explorer feature.",
+                    command.short_label()
+                );
+            }
         }
     }
 
@@ -426,20 +509,13 @@ impl LuxePixApp {
         {
             return;
         }
-        if shortcut_pressed(ctx, &self.config.shortcuts.settings) {
-            self.show_settings = true;
-        } else if shortcut_pressed(ctx, &self.config.shortcuts.copy) {
-            self.execute_file_command(FileCommand::Copy);
-        } else if shortcut_pressed(ctx, &self.config.shortcuts.cut) {
-            self.execute_file_command(FileCommand::Cut);
-        } else if shortcut_pressed(ctx, &self.config.shortcuts.paste) {
-            self.execute_file_command(FileCommand::Paste);
-        } else if shortcut_pressed(ctx, &self.config.shortcuts.rename) {
-            self.execute_file_command(FileCommand::Rename);
-        } else if shortcut_pressed(ctx, &self.config.shortcuts.delete) {
-            self.execute_file_command(FileCommand::Delete);
-        } else if shortcut_pressed(ctx, &self.config.shortcuts.open) {
-            self.execute_file_command(FileCommand::Open);
+        for command in CommandId::ACTIVE {
+            if self.command_enabled(command)
+                && shortcut_pressed(ctx, self.config.shortcuts.get(command))
+            {
+                self.execute_command(command);
+                break;
+            }
         }
     }
 }
@@ -447,7 +523,11 @@ impl LuxePixApp {
 // ── eframe::App impl ──────────────────────────────────────────
 impl eframe::App for LuxePixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let resolved_theme = resolve_theme(ctx, &self.config.theme);
+        if resolved_theme != self.effective_theme {
+            self.effective_theme = apply_theme(ctx, &self.config.theme).to_string();
+        }
+        let palette = Palette::for_theme(&self.effective_theme);
 
         // Process thumbnail results
         let loaded_thumbs = self.thumb_mgr.process_results(ctx);
@@ -593,7 +673,7 @@ impl eframe::App for LuxePixApp {
 // ── UI Rendering ──────────────────────────────────────────────
 impl LuxePixApp {
     fn render_address_bar(&mut self, ui: &mut egui::Ui) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
 
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
@@ -697,27 +777,30 @@ impl LuxePixApp {
                 self.show_history = !self.show_history;
             }
 
-            if icon_button(ui, IconKind::Refresh, None, "Refresh", false, &palette).clicked() {
-                if let Some(p) = self.current_path.clone() {
-                    self.thumb_mgr.clear();
-                    self.navigate_to(p);
-                }
+            if ui
+                .add_enabled_ui(self.command_enabled(CommandId::Refresh), |ui| {
+                    icon_button(ui, IconKind::Refresh, None, "Refresh", false, &palette)
+                })
+                .inner
+                .clicked()
+            {
+                self.execute_command(CommandId::Refresh);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let theme_icon = if self.config.theme == "dark" {
+                let theme_icon = if self.effective_theme == "dark" {
                     IconKind::Sun
                 } else {
                     IconKind::Moon
                 };
-                let tip = if self.config.theme == "dark" {
-                    "Switch to light theme"
-                } else {
-                    "Switch to dark theme"
+                let tip = match self.config.theme.as_str() {
+                    "light" => "Theme: Light. Click for Dark.",
+                    "dark" => "Theme: Dark. Click for System.",
+                    _ => "Theme: System. Click for Light.",
                 };
                 if icon_button(ui, theme_icon, None, tip, false, &palette).clicked() {
                     self.config.toggle_theme();
-                    apply_theme(ui.ctx(), &self.config.theme);
+                    self.effective_theme = apply_theme(ui.ctx(), &self.config.theme).to_string();
                     self.status = format!("Switched to {} theme.", self.config.theme);
                 }
                 if icon_button(
@@ -730,14 +813,14 @@ impl LuxePixApp {
                 )
                 .clicked()
                 {
-                    self.show_settings = true;
+                    self.execute_command(CommandId::Settings);
                 }
             });
         });
     }
 
     fn render_history_popover(&mut self, ctx: &egui::Context) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
         let mut nav_to: Option<PathBuf> = None;
         let mut remove_path: Option<String> = None;
 
@@ -876,7 +959,7 @@ impl LuxePixApp {
     }
 
     fn render_status_bar(&mut self, ui: &mut egui::Ui) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
         ui.horizontal_centered(|ui| {
             let dot_color = status_color(&self.status, &palette);
             let dot_rect = ui
@@ -903,62 +986,320 @@ impl LuxePixApp {
     }
 
     fn render_settings_window(&mut self, ctx: &egui::Context) {
-        let palette = Palette::for_theme(&self.config.theme);
+        if let Some(command) = self.shortcut_capture {
+            if let Some(captured) = capture_shortcut(ctx) {
+                match captured {
+                    CapturedShortcut::Cancel => {
+                        self.shortcut_capture = None;
+                    }
+                    CapturedShortcut::Value(value) => {
+                        *self.shortcut_draft.get_mut(command) = value;
+                        self.shortcut_capture = None;
+                    }
+                }
+            }
+        }
+
+        let palette = Palette::for_theme(&self.effective_theme);
         let mut open = self.show_settings;
-        let mut save = false;
-        let mut reset = false;
-        let mut changed = false;
+        let mut save_shortcuts = false;
+        let mut reset_shortcuts = false;
+        let mut import_shortcuts = false;
+        let mut export_shortcuts = false;
+        let mut config_changed = false;
+        let mut close_window = false;
 
         egui::Window::new("Settings")
             .open(&mut open)
-            .resizable(false)
+            .resizable(true)
             .collapsible(false)
-            .default_width(420.0)
+            .default_size(egui::vec2(760.0, 570.0))
+            .min_width(680.0)
+            .min_height(480.0)
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("Keyboard shortcuts")
-                        .size(15.0)
-                        .strong()
-                        .color(palette.text_primary),
-                );
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new("Format: Ctrl+C, Ctrl+Shift+C, F2, Delete, Enter.")
-                        .size(12.0)
-                        .color(palette.text_secondary),
-                );
-                ui.add_space(12.0);
-
-                changed |= shortcut_row(ui, "Copy", &mut self.config.shortcuts.copy);
-                changed |= shortcut_row(ui, "Cut", &mut self.config.shortcuts.cut);
-                changed |= shortcut_row(ui, "Paste", &mut self.config.shortcuts.paste);
-                changed |= shortcut_row(ui, "Rename", &mut self.config.shortcuts.rename);
-                changed |= shortcut_row(ui, "Delete", &mut self.config.shortcuts.delete);
-                changed |= shortcut_row(ui, "Open", &mut self.config.shortcuts.open);
-                changed |= shortcut_row(ui, "Settings", &mut self.config.shortcuts.settings);
-
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        save = true;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for tab in SettingsTab::ALL {
+                        if ui
+                            .selectable_label(self.settings_tab == tab, tab.label())
+                            .clicked()
+                        {
+                            self.settings_tab = tab;
+                            self.shortcut_capture = None;
+                        }
                     }
-                    if ui.button("Reset defaults").clicked() {
-                        reset = true;
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.settings_tab {
+                        SettingsTab::General => {
+                            settings_heading(ui, "General", &palette);
+                            config_changed |= ui
+                                .checkbox(
+                                    &mut self.config.check_updates_on_startup,
+                                    "Check for updates on startup",
+                                )
+                                .changed();
+                            config_changed |= ui
+                                .checkbox(
+                                    &mut self.config.show_selection_checkboxes,
+                                    "Show selection checkboxes",
+                                )
+                                .changed();
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} recent paths saved",
+                                    self.config.path_history.len()
+                                ))
+                                .color(palette.text_secondary),
+                            );
+                        }
+                        SettingsTab::Appearance => {
+                            settings_heading(ui, "Appearance", &palette);
+                            ui.horizontal(|ui| {
+                                ui.label("Theme");
+                                for (value, label) in
+                                    [("light", "Light"), ("dark", "Dark"), ("system", "System")]
+                                {
+                                    config_changed |= ui
+                                        .selectable_value(
+                                            &mut self.config.theme,
+                                            value.to_string(),
+                                            label,
+                                        )
+                                        .changed();
+                                }
+                            });
+                            ui.add_space(14.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Active palette: {}",
+                                    capitalize(&self.effective_theme)
+                                ))
+                                .color(palette.text_secondary),
+                            );
+                        }
+                        SettingsTab::Shortcuts => {
+                            settings_heading(ui, "Keyboard Shortcuts", &palette);
+
+                            if let Some(error) = self.shortcut_draft.validation_error() {
+                                ui.colored_label(palette.error, error);
+                                ui.add_space(8.0);
+                            }
+
+                            for command in CommandId::CONFIGURABLE {
+                                shortcut_capture_row(
+                                    ui,
+                                    command,
+                                    &mut self.shortcut_draft,
+                                    &mut self.shortcut_capture,
+                                    &palette,
+                                );
+                            }
+
+                            ui.add_space(10.0);
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Save").clicked() {
+                                    save_shortcuts = true;
+                                }
+                                if ui.button("Reset Defaults").clicked() {
+                                    reset_shortcuts = true;
+                                }
+                                if ui.button("Import Profile").clicked() {
+                                    import_shortcuts = true;
+                                }
+                                if ui.button("Export Profile").clicked() {
+                                    export_shortcuts = true;
+                                }
+                            });
+                        }
+                        SettingsTab::SearchIndex => {
+                            settings_heading(ui, "Search & Index", &palette);
+                            ui.horizontal(|ui| {
+                                ui.label("Similarity results");
+                                config_changed |= ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut self.config.similarity_result_count,
+                                            5..=50,
+                                        )
+                                        .show_value(true),
+                                    )
+                                    .changed();
+                            });
+                            ui.add_space(12.0);
+                            settings_path_row(ui, "Index", &self.storage.index_dir, &palette);
+                            settings_path_row(
+                                ui,
+                                "Similarity data",
+                                &self.storage.similarity_dir,
+                                &palette,
+                            );
+                        }
+                        SettingsTab::FileOperations => {
+                            settings_heading(ui, "File Operations", &palette);
+                            config_changed |= ui
+                                .checkbox(&mut self.config.show_hidden_files, "Show hidden files")
+                                .changed();
+                            config_changed |= ui
+                                .checkbox(
+                                    &mut self.config.confirm_permanent_delete,
+                                    "Confirm permanent deletion",
+                                )
+                                .changed();
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(if self.clipboard.is_some() {
+                                    "LuxePix clipboard contains selected items."
+                                } else {
+                                    "LuxePix clipboard is empty."
+                                })
+                                .color(palette.text_secondary),
+                            );
+                        }
+                        SettingsTab::Advanced => {
+                            settings_heading(ui, "Advanced", &palette);
+                            settings_value_row(
+                                ui,
+                                "Storage mode",
+                                self.storage.mode_label(),
+                                &palette,
+                            );
+                            settings_path_row(ui, "Data root", &self.storage.root, &palette);
+                            settings_path_row(ui, "Config", &self.storage.config, &palette);
+                            settings_path_row(ui, "Session state", &self.storage.state, &palette);
+                            settings_path_row(
+                                ui,
+                                "Thumbnail cache",
+                                &self.storage.thumbnails_dir,
+                                &palette,
+                            );
+                            settings_path_row(
+                                ui,
+                                "Update staging",
+                                &self.storage.updates_dir,
+                                &palette,
+                            );
+                            ui.add_space(12.0);
+                            if ui.button("Open Data Folder").clicked() {
+                                Self::open_file_external(&self.storage.root);
+                            }
+                        }
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Close").clicked() {
+                        close_window = true;
                     }
                 });
             });
 
-        if reset {
-            self.config.shortcuts = ShortcutConfig::default();
-            self.config.save();
-            self.status = "Shortcut defaults restored.".into();
-        } else if save || changed {
-            self.config.save();
-            if save {
-                self.status = "Shortcut settings saved.".into();
+        if reset_shortcuts {
+            self.shortcut_draft = ShortcutConfig::default();
+            self.shortcut_capture = None;
+            self.status = "Shortcut defaults loaded. Save to apply them.".into();
+        }
+
+        if save_shortcuts {
+            if let Some(error) = self.shortcut_draft.validation_error() {
+                self.status = format!("Shortcuts were not saved: {error}");
+            } else {
+                self.config.shortcuts = self.shortcut_draft.clone();
+                match self.config.save() {
+                    Ok(()) => self.status = "Shortcut settings saved.".into(),
+                    Err(error) => self.status = format!("Could not save shortcuts: {error}"),
+                }
             }
         }
+
+        if import_shortcuts {
+            self.import_shortcut_profile();
+        }
+        if export_shortcuts {
+            self.export_shortcut_profile();
+        }
+
+        if config_changed {
+            self.effective_theme = apply_theme(ctx, &self.config.theme).to_string();
+            if let Err(error) = self.config.save() {
+                self.status = format!("Could not save settings: {error}");
+            }
+        }
+
+        if close_window {
+            open = false;
+        }
+        if !open {
+            self.shortcut_capture = None;
+            self.shortcut_draft = self.config.shortcuts.clone();
+        }
         self.show_settings = open;
+    }
+
+    fn import_shortcut_profile(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("LuxePix shortcut profile", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        match fs::read_to_string(&path) {
+            Ok(json) => match self.config.import_shortcut_profile(&json) {
+                Ok(()) => {
+                    self.shortcut_draft = self.config.shortcuts.clone();
+                    self.shortcut_capture = None;
+                    self.status = format!(
+                        "Imported shortcut profile from {}.",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                Err(error) => {
+                    self.status = format!("Shortcut profile was not imported: {error}");
+                }
+            },
+            Err(error) => {
+                self.status = format!("Could not read shortcut profile: {error}");
+            }
+        }
+    }
+
+    fn export_shortcut_profile(&mut self) {
+        if let Some(error) = self.shortcut_draft.validation_error() {
+            self.status = format!("Shortcut profile was not exported: {error}");
+            return;
+        }
+
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("LuxePix shortcut profile", &["json"])
+            .set_file_name("LuxePix-shortcuts.json")
+            .save_file()
+        else {
+            return;
+        };
+
+        let mut export_config = self.config.clone();
+        export_config.shortcuts = self.shortcut_draft.clone();
+        match export_config.export_shortcut_profile() {
+            Ok(json) => match transactional_write(&path, json.as_bytes()) {
+                Ok(()) => {
+                    self.status = format!("Exported shortcut profile to {}.", path.display());
+                }
+                Err(error) => {
+                    self.status = format!("Could not write shortcut profile: {error}");
+                }
+            },
+            Err(error) => {
+                self.status = format!("Could not encode shortcut profile: {error}");
+            }
+        }
     }
 
     fn render_delete_confirmation(&mut self, ctx: &egui::Context) {
@@ -984,13 +1325,13 @@ impl LuxePixApp {
                 ui.label(
                     egui::RichText::new(elide_middle(&sample, 72))
                         .size(12.0)
-                        .color(Palette::for_theme(&self.config.theme).text_secondary),
+                        .color(Palette::for_theme(&self.effective_theme).text_secondary),
                 );
                 ui.add_space(10.0);
                 ui.label(
                     egui::RichText::new("This removes files from disk.")
                         .size(12.0)
-                        .color(Palette::for_theme(&self.config.theme).error),
+                        .color(Palette::for_theme(&self.effective_theme).error),
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -1011,7 +1352,7 @@ impl LuxePixApp {
     }
 
     fn render_initial_state(&mut self, ui: &mut egui::Ui) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
                 let art = ui.allocate_exact_size(egui::vec2(96.0, 96.0), egui::Sense::hover()).0;
@@ -1038,7 +1379,7 @@ impl LuxePixApp {
     }
 
     fn render_select_folder_state(&mut self, ui: &mut egui::Ui) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
                 let art = ui
@@ -1074,8 +1415,7 @@ impl LuxePixApp {
     }
 
     fn render_file_action_bar(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        let has_selection = self.selected_file.is_some();
-        if !has_selection && self.clipboard.is_none() {
+        if self.selected_file.is_none() && self.clipboard.is_none() {
             return;
         }
 
@@ -1095,48 +1435,35 @@ impl LuxePixApp {
                             .color(palette.text_secondary),
                     );
                     ui.add_space(8.0);
-                    if ui
-                        .add_enabled(has_selection, egui::Button::new("Open"))
-                        .clicked()
-                    {
-                        self.execute_file_command(FileCommand::Open);
-                    }
-                    if ui
-                        .add_enabled(has_selection, egui::Button::new("Copy"))
-                        .clicked()
-                    {
-                        self.execute_file_command(FileCommand::Copy);
-                    }
-                    if ui
-                        .add_enabled(has_selection, egui::Button::new("Cut"))
-                        .clicked()
-                    {
-                        self.execute_file_command(FileCommand::Cut);
-                    }
-                    if ui
-                        .add_enabled(self.clipboard.is_some(), egui::Button::new("Paste"))
-                        .clicked()
-                    {
-                        self.execute_file_command(FileCommand::Paste);
-                    }
-                    if ui
-                        .add_enabled(has_selection, egui::Button::new("Rename"))
-                        .clicked()
-                    {
-                        self.execute_file_command(FileCommand::Rename);
-                    }
-                    if ui
-                        .add_enabled(has_selection, egui::Button::new("Delete"))
-                        .clicked()
-                    {
-                        self.execute_file_command(FileCommand::Delete);
+                    for command in [
+                        CommandId::Open,
+                        CommandId::Copy,
+                        CommandId::Cut,
+                        CommandId::Paste,
+                        CommandId::Rename,
+                        CommandId::Delete,
+                    ] {
+                        if ui
+                            .add_enabled(
+                                self.command_enabled(command),
+                                egui::Button::new(command.short_label()),
+                            )
+                            .on_hover_text(format!(
+                                "{} ({})",
+                                command.label(),
+                                self.config.shortcuts.get(command)
+                            ))
+                            .clicked()
+                        {
+                            self.execute_command(command);
+                        }
                     }
                 });
             });
     }
 
     fn render_left_pane(&mut self, ui: &mut egui::Ui) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
         let total_images: usize = self.folders.iter().map(|f| f.image_count).sum();
 
         render_pane_header(
@@ -1165,7 +1492,10 @@ impl LuxePixApp {
         let mut start_rename: Option<(PathBuf, String)> = None;
         let mut commit_rename = false;
         let mut cancel_rename = false;
-        let mut context_command: Option<FileCommand> = None;
+        let mut context_command: Option<CommandId> = None;
+        let mut menu_context = self.command_context();
+        menu_context.has_selection = true;
+        menu_context.has_target_directory = true;
 
         let renaming_path = self.renaming.as_ref().map(|r| r.original_path.clone());
 
@@ -1231,29 +1561,23 @@ impl LuxePixApp {
                             new_select = Some(i);
                         }
                         tile_resp.context_menu(|ui| {
-                            if ui.button("Open").clicked() {
-                                context_command = Some(FileCommand::Open);
-                                ui.close_menu();
-                            }
-                            if ui.button("Copy").clicked() {
-                                context_command = Some(FileCommand::Copy);
-                                ui.close_menu();
-                            }
-                            if ui.button("Cut").clicked() {
-                                context_command = Some(FileCommand::Cut);
-                                ui.close_menu();
-                            }
-                            if ui.button("Paste").clicked() {
-                                context_command = Some(FileCommand::Paste);
-                                ui.close_menu();
-                            }
-                            if ui.button("Rename").clicked() {
-                                context_command = Some(FileCommand::Rename);
-                                ui.close_menu();
-                            }
-                            if ui.button("Delete").clicked() {
-                                context_command = Some(FileCommand::Delete);
-                                ui.close_menu();
+                            for command in [
+                                CommandId::Open,
+                                CommandId::Copy,
+                                CommandId::Cut,
+                                CommandId::Paste,
+                                CommandId::Rename,
+                                CommandId::Delete,
+                            ] {
+                                if context_menu_command(
+                                    ui,
+                                    command,
+                                    menu_context,
+                                    self.config.shortcuts.get(command),
+                                ) {
+                                    context_command = Some(command);
+                                    ui.close_menu();
+                                }
                             }
                         });
 
@@ -1335,12 +1659,12 @@ impl LuxePixApp {
             self.renaming = None;
         }
         if let Some(command) = context_command {
-            self.execute_file_command(command);
+            self.execute_command(command);
         }
     }
 
     fn render_right_pane(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
-        let palette = Palette::for_theme(&self.config.theme);
+        let palette = Palette::for_theme(&self.effective_theme);
         let folder_name = self
             .selected_folder
             .and_then(|i| self.folders.get(i))
@@ -1375,7 +1699,9 @@ impl LuxePixApp {
         let mut start_rename: Option<(PathBuf, String)> = None;
         let mut commit_rename = false;
         let mut cancel_rename = false;
-        let mut context_command: Option<FileCommand> = None;
+        let mut context_command: Option<CommandId> = None;
+        let mut menu_context = self.command_context();
+        menu_context.has_selection = true;
 
         let renaming_path = self.renaming.as_ref().map(|r| r.original_path.clone());
 
@@ -1451,29 +1777,23 @@ impl LuxePixApp {
                             self.selected_file = Some(fi);
                         }
                         tile_resp.context_menu(|ui| {
-                            if ui.button("Open").clicked() {
-                                context_command = Some(FileCommand::Open);
-                                ui.close_menu();
-                            }
-                            if ui.button("Copy").clicked() {
-                                context_command = Some(FileCommand::Copy);
-                                ui.close_menu();
-                            }
-                            if ui.button("Cut").clicked() {
-                                context_command = Some(FileCommand::Cut);
-                                ui.close_menu();
-                            }
-                            if ui.button("Paste").clicked() {
-                                context_command = Some(FileCommand::Paste);
-                                ui.close_menu();
-                            }
-                            if ui.button("Rename").clicked() {
-                                context_command = Some(FileCommand::Rename);
-                                ui.close_menu();
-                            }
-                            if ui.button("Delete").clicked() {
-                                context_command = Some(FileCommand::Delete);
-                                ui.close_menu();
+                            for command in [
+                                CommandId::Open,
+                                CommandId::Copy,
+                                CommandId::Cut,
+                                CommandId::Paste,
+                                CommandId::Rename,
+                                CommandId::Delete,
+                            ] {
+                                if context_menu_command(
+                                    ui,
+                                    command,
+                                    menu_context,
+                                    self.config.shortcuts.get(command),
+                                ) {
+                                    context_command = Some(command);
+                                    ui.close_menu();
+                                }
                             }
                         });
 
@@ -1583,7 +1903,7 @@ impl LuxePixApp {
             self.renaming = None;
         }
         if let Some(command) = context_command {
-            self.execute_file_command(command);
+            self.execute_command(command);
         }
     }
 
@@ -1971,7 +2291,19 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> egui::Color32 {
     egui::Color32::from_rgba_premultiplied(r, g, b, a)
 }
 
-fn apply_theme(ctx: &egui::Context, theme: &str) {
+fn resolve_theme(ctx: &egui::Context, preference: &str) -> &'static str {
+    match preference {
+        "light" => "light",
+        "dark" => "dark",
+        _ => match ctx.system_theme() {
+            Some(egui::Theme::Dark) => "dark",
+            _ => "light",
+        },
+    }
+}
+
+fn apply_theme(ctx: &egui::Context, preference: &str) -> &'static str {
+    let theme = resolve_theme(ctx, preference);
     let palette = Palette::for_theme(theme);
     let mut visuals = if theme == "dark" {
         egui::Visuals::dark()
@@ -1997,6 +2329,7 @@ fn apply_theme(ctx: &egui::Context, theme: &str) {
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
     style.visuals = ctx.style().visuals.clone();
     ctx.set_style(style);
+    theme
 }
 
 fn status_color(status: &str, palette: &Palette) -> egui::Color32 {
@@ -2658,21 +2991,211 @@ fn elide_middle(s: &str, max: usize) -> String {
     format!("{}...{}", start, end)
 }
 
-fn shortcut_row(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
-    let mut changed = false;
+fn settings_heading(ui: &mut egui::Ui, title: &str, palette: &Palette) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(15.0)
+            .strong()
+            .color(palette.text_primary),
+    );
+    ui.add_space(12.0);
+}
+
+fn settings_value_row(ui: &mut egui::Ui, label: &str, value: &str, palette: &Palette) {
     ui.horizontal(|ui| {
-        ui.set_height(30.0);
-        ui.add_sized([112.0, 22.0], egui::Label::new(label));
-        changed = ui
-            .add_sized(
-                [180.0, 24.0],
-                egui::TextEdit::singleline(value)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(180.0),
-            )
-            .changed();
+        ui.add_sized([130.0, 22.0], egui::Label::new(label));
+        ui.label(
+            egui::RichText::new(value)
+                .monospace()
+                .color(palette.text_secondary),
+        );
     });
-    changed
+}
+
+fn settings_path_row(ui: &mut egui::Ui, label: &str, path: &Path, palette: &Palette) {
+    settings_value_row(
+        ui,
+        label,
+        &elide_middle(&path.to_string_lossy(), 72),
+        palette,
+    );
+}
+
+fn shortcut_capture_row(
+    ui: &mut egui::Ui,
+    command: CommandId,
+    shortcuts: &mut ShortcutConfig,
+    capture: &mut Option<CommandId>,
+    palette: &Palette,
+) {
+    let is_capturing = *capture == Some(command);
+    let current = shortcuts.get(command);
+    let button_text = if is_capturing {
+        "Press shortcut...".to_string()
+    } else if current.trim().is_empty() {
+        "Unassigned".to_string()
+    } else {
+        current.to_string()
+    };
+
+    ui.horizontal(|ui| {
+        ui.set_height(34.0);
+        ui.add_sized([210.0, 24.0], egui::Label::new(command.label()));
+        let response = ui.add_sized(
+            [220.0, 27.0],
+            egui::Button::new(egui::RichText::new(button_text).monospace().color(
+                if is_capturing {
+                    palette.accent
+                } else {
+                    palette.text_primary
+                },
+            )),
+        );
+        if response.clicked() {
+            *capture = Some(command);
+        }
+        if ui
+            .add_enabled(
+                !shortcuts.get(command).is_empty(),
+                egui::Button::new("Clear"),
+            )
+            .clicked()
+        {
+            shortcuts.get_mut(command).clear();
+            *capture = None;
+        }
+    });
+}
+
+fn context_menu_command(
+    ui: &mut egui::Ui,
+    command: CommandId,
+    context: CommandContext,
+    shortcut: &str,
+) -> bool {
+    let label = if shortcut.trim().is_empty() {
+        command.short_label().to_string()
+    } else {
+        format!("{}    {}", command.short_label(), shortcut)
+    };
+    ui.add_enabled(
+        command.enabled(context),
+        egui::Button::new(label).frame(false),
+    )
+    .clicked()
+}
+
+fn capture_shortcut(ctx: &egui::Context) -> Option<CapturedShortcut> {
+    ctx.input(|input| {
+        input.events.iter().rev().find_map(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = event
+            else {
+                return None;
+            };
+
+            if *key == egui::Key::Escape && !modifiers.ctrl && !modifiers.shift && !modifiers.alt {
+                return Some(CapturedShortcut::Cancel);
+            }
+
+            shortcut_key_name(*key).map(|key_name| {
+                let mut parts = Vec::with_capacity(4);
+                if modifiers.ctrl {
+                    parts.push("Ctrl");
+                }
+                if modifiers.shift {
+                    parts.push("Shift");
+                }
+                if modifiers.alt {
+                    parts.push("Alt");
+                }
+                parts.push(key_name);
+                CapturedShortcut::Value(parts.join("+"))
+            })
+        })
+    })
+}
+
+fn shortcut_key_name(key: egui::Key) -> Option<&'static str> {
+    match key {
+        egui::Key::A => Some("A"),
+        egui::Key::B => Some("B"),
+        egui::Key::C => Some("C"),
+        egui::Key::D => Some("D"),
+        egui::Key::E => Some("E"),
+        egui::Key::F => Some("F"),
+        egui::Key::G => Some("G"),
+        egui::Key::H => Some("H"),
+        egui::Key::I => Some("I"),
+        egui::Key::J => Some("J"),
+        egui::Key::K => Some("K"),
+        egui::Key::L => Some("L"),
+        egui::Key::M => Some("M"),
+        egui::Key::N => Some("N"),
+        egui::Key::O => Some("O"),
+        egui::Key::P => Some("P"),
+        egui::Key::Q => Some("Q"),
+        egui::Key::R => Some("R"),
+        egui::Key::S => Some("S"),
+        egui::Key::T => Some("T"),
+        egui::Key::U => Some("U"),
+        egui::Key::V => Some("V"),
+        egui::Key::W => Some("W"),
+        egui::Key::X => Some("X"),
+        egui::Key::Y => Some("Y"),
+        egui::Key::Z => Some("Z"),
+        egui::Key::Num0 => Some("0"),
+        egui::Key::Num1 => Some("1"),
+        egui::Key::Num2 => Some("2"),
+        egui::Key::Num3 => Some("3"),
+        egui::Key::Num4 => Some("4"),
+        egui::Key::Num5 => Some("5"),
+        egui::Key::Num6 => Some("6"),
+        egui::Key::Num7 => Some("7"),
+        egui::Key::Num8 => Some("8"),
+        egui::Key::Num9 => Some("9"),
+        egui::Key::Enter => Some("Enter"),
+        egui::Key::Delete => Some("Delete"),
+        egui::Key::Backspace => Some("Backspace"),
+        egui::Key::Space => Some("Space"),
+        egui::Key::Tab => Some("Tab"),
+        egui::Key::Insert => Some("Insert"),
+        egui::Key::Home => Some("Home"),
+        egui::Key::End => Some("End"),
+        egui::Key::PageUp => Some("PageUp"),
+        egui::Key::PageDown => Some("PageDown"),
+        egui::Key::ArrowLeft => Some("Left"),
+        egui::Key::ArrowRight => Some("Right"),
+        egui::Key::ArrowUp => Some("Up"),
+        egui::Key::ArrowDown => Some("Down"),
+        egui::Key::F1 => Some("F1"),
+        egui::Key::F2 => Some("F2"),
+        egui::Key::F3 => Some("F3"),
+        egui::Key::F4 => Some("F4"),
+        egui::Key::F5 => Some("F5"),
+        egui::Key::F6 => Some("F6"),
+        egui::Key::F7 => Some("F7"),
+        egui::Key::F8 => Some("F8"),
+        egui::Key::F9 => Some("F9"),
+        egui::Key::F10 => Some("F10"),
+        egui::Key::F11 => Some("F11"),
+        egui::Key::F12 => Some("F12"),
+        egui::Key::Comma => Some(","),
+        _ => None,
+    }
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn shortcut_pressed(ctx: &egui::Context, spec: &str) -> bool {
@@ -2735,12 +3258,31 @@ fn parse_shortcut_key(name: &str) -> Option<egui::Key> {
         "x" => Some(egui::Key::X),
         "y" => Some(egui::Key::Y),
         "z" => Some(egui::Key::Z),
+        "0" => Some(egui::Key::Num0),
+        "1" => Some(egui::Key::Num1),
+        "2" => Some(egui::Key::Num2),
+        "3" => Some(egui::Key::Num3),
+        "4" => Some(egui::Key::Num4),
+        "5" => Some(egui::Key::Num5),
+        "6" => Some(egui::Key::Num6),
+        "7" => Some(egui::Key::Num7),
+        "8" => Some(egui::Key::Num8),
+        "9" => Some(egui::Key::Num9),
         "enter" | "return" => Some(egui::Key::Enter),
         "delete" | "del" => Some(egui::Key::Delete),
         "backspace" => Some(egui::Key::Backspace),
         "escape" | "esc" => Some(egui::Key::Escape),
         "space" => Some(egui::Key::Space),
         "tab" => Some(egui::Key::Tab),
+        "insert" => Some(egui::Key::Insert),
+        "home" => Some(egui::Key::Home),
+        "end" => Some(egui::Key::End),
+        "pageup" => Some(egui::Key::PageUp),
+        "pagedown" => Some(egui::Key::PageDown),
+        "left" => Some(egui::Key::ArrowLeft),
+        "right" => Some(egui::Key::ArrowRight),
+        "up" => Some(egui::Key::ArrowUp),
+        "down" => Some(egui::Key::ArrowDown),
         "f1" => Some(egui::Key::F1),
         "f2" => Some(egui::Key::F2),
         "f3" => Some(egui::Key::F3),

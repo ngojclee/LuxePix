@@ -28,22 +28,22 @@ This checklist follows:
 
 ## E1 - Core Architecture And Visual Shell
 
-- [ ] Add mode-aware storage root and atomic state writes.
-- [ ] Migrate config to typed Serde structures with schema versioning.
-- [ ] Support Light, Dark, and System theme modes.
-- [ ] Add a unified `CommandId` registry and enabled-state model.
-- [ ] Route toolbar, context menu, shortcuts, and action bar through commands.
-- [ ] Add shortcut capture, validation, conflict detection, reset, import, and export.
+- [x] Add mode-aware storage root and atomic state writes.
+- [x] Migrate config to typed Serde structures with schema versioning.
+- [x] Support Light, Dark, and System theme modes.
+- [x] Add a unified `CommandId` registry and enabled-state model.
+- [x] Route toolbar, context menu, shortcuts, and action bar through commands.
+- [x] Add shortcut capture, validation, conflict detection, reset, import, and export.
 - [ ] Add path-based stable item IDs.
 - [ ] Add background task/event infrastructure.
 - [ ] Move scans and long operations off the egui frame thread.
 - [ ] Split large UI sections out of `src/app.rs`.
 - [ ] Rebuild the approved `design/` shell in reusable egui components.
 - [ ] Add first-run source/cache/index setup.
-- [ ] Add tabbed Settings.
+- [x] Add tabbed Settings.
 - [ ] Add compact source/favorites/recent sidebar.
 - [ ] Add collapsible details panel.
-- [ ] Fix inline rename so row/tile geometry never moves.
+- [~] Fix inline rename so row/tile geometry never moves.
 
 ## E2 - Explorer Interaction
 
@@ -141,7 +141,7 @@ This checklist follows:
 
 ## Quality And Acceptance
 
-- [ ] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, and versions.
+- [~] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, and versions.
 - [ ] Add temp-directory integration tests for file operations and Undo.
 - [ ] Add SQLite migration, rebuild, and search tests.
 - [ ] Add pHash grouping and ranking tests.
@@ -168,3 +168,9 @@ This checklist follows:
 - 2026-07-16: Clean clone of commit `3307014` completed a locked release build.
 - 2026-07-16: Added baseline tests for image-extension detection and byte-size
   formatting.
+- 2026-07-16: Completed the first E1 core slice: installed/portable storage,
+  transactional config writes, typed schema migration, System theme support,
+  unified command enablement/dispatch, tabbed Settings, and captured shortcut
+  profiles with validation, conflict detection, reset, import, and export.
+- 2026-07-16: E1 core verification passed with format, strict Clippy, 12 unit
+  tests, locked release build, and a release executable startup smoke test.

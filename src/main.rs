@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod commands;
 mod config;
 mod scanner;
+mod storage;
 mod thumbs;
 
 use eframe::egui;

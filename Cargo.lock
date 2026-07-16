@@ -1927,6 +1927,7 @@ dependencies = [
  "natord",
  "rayon",
  "rfd",
+ "serde",
  "serde_json",
  "winresource",
 ]
