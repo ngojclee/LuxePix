@@ -122,6 +122,7 @@ impl LuxePixApp {
                 self.config.add_source(&source);
                 self.config.first_run_complete = true;
                 let _ = self.config.save();
+                self.request_index_rebuild();
                 self.navigate_to(source);
                 self.status = "LuxePix setup complete.".into();
             } else {

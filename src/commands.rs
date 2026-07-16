@@ -64,9 +64,10 @@ impl CommandId {
         Self::EditAddress,
     ];
 
-    pub const ACTIVE: [Self; 19] = [
+    pub const ACTIVE: [Self; 20] = [
         Self::Settings,
         Self::EditAddress,
+        Self::Find,
         Self::Back,
         Self::Forward,
         Self::Up,
@@ -155,14 +156,14 @@ impl CommandId {
                 context.has_single_selection
             }
             Self::Paste => context.has_clipboard && context.has_target_directory,
-            Self::NewFolder | Self::Refresh | Self::Find => context.has_current_path,
+            Self::NewFolder | Self::Refresh => context.has_current_path,
             Self::SelectAll => context.has_items,
             Self::Undo => context.can_undo,
             Self::Back => context.can_navigate_back,
             Self::Forward => context.can_navigate_forward,
             Self::Up => context.can_navigate_up,
             Self::Preview => context.has_previewable_selection,
-            Self::Settings | Self::EditAddress => true,
+            Self::Find | Self::Settings | Self::EditAddress => true,
         }
     }
 }
@@ -193,6 +194,7 @@ mod tests {
         assert!(!CommandId::Copy.enabled(empty));
         assert!(!CommandId::Paste.enabled(empty));
         assert!(CommandId::Settings.enabled(empty));
+        assert!(CommandId::Find.enabled(empty));
 
         let selected = CommandContext {
             has_selection: true,

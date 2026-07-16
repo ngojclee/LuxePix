@@ -51,11 +51,21 @@ impl LuxePixApp {
         if collapsed {
             for source in sources.iter().take(7) {
                 let path = PathBuf::from(&source.path);
+                let source_status = self.index.source_status(&source.path);
+                let availability = source_status
+                    .map(|status| {
+                        if status.available {
+                            "available"
+                        } else {
+                            "unavailable"
+                        }
+                    })
+                    .unwrap_or("not indexed");
                 if icon_button(
                     ui,
                     IconKind::Folder,
                     None,
-                    &format!("{} - {}", source.name, source.path),
+                    &format!("{} - {} ({availability})", source.name, source.path),
                     self.current_path.as_ref() == Some(&path),
                     &palette,
                 )
@@ -73,7 +83,13 @@ impl LuxePixApp {
             if !favorites.is_empty() {
                 sidebar_section_label(ui, "FAVORITES", &palette);
                 for source in &favorites {
-                    if source_row(ui, source, self.current_path.as_deref(), &palette) {
+                    if source_row(
+                        ui,
+                        source,
+                        self.current_path.as_deref(),
+                        self.index.source_status(&source.path),
+                        &palette,
+                    ) {
                         navigate_to = Some(PathBuf::from(&source.path));
                     }
                 }
@@ -89,8 +105,13 @@ impl LuxePixApp {
                 );
             } else {
                 for source in &sources {
-                    let response =
-                        source_row_response(ui, source, self.current_path.as_deref(), &palette);
+                    let response = source_row_response(
+                        ui,
+                        source,
+                        self.current_path.as_deref(),
+                        self.index.source_status(&source.path),
+                        &palette,
+                    );
                     if response.clicked() {
                         navigate_to = Some(PathBuf::from(&source.path));
                     }
@@ -118,6 +139,7 @@ impl LuxePixApp {
             if ui.button("Add Source").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.config.add_source(&path);
+                    self.request_index_rebuild();
                     navigate_to = Some(path);
                 }
             }
@@ -150,6 +172,7 @@ impl LuxePixApp {
         }
         if let Some(path) = remove_source {
             self.config.remove_source(&path);
+            self.request_index_rebuild();
         }
         if let Some(path) = navigate_to {
             self.navigate_to(path);
@@ -171,28 +194,52 @@ fn source_row(
     ui: &mut egui::Ui,
     source: &crate::config::SourceConfig,
     current: Option<&Path>,
+    status: Option<&crate::index::SourceIndexStatus>,
     palette: &Palette,
 ) -> bool {
-    source_row_response(ui, source, current, palette).clicked()
+    source_row_response(ui, source, current, status, palette).clicked()
 }
 
 fn source_row_response(
     ui: &mut egui::Ui,
     source: &crate::config::SourceConfig,
     current: Option<&Path>,
+    status: Option<&crate::index::SourceIndexStatus>,
     palette: &Palette,
 ) -> egui::Response {
     let path = Path::new(&source.path);
     let selected = current == Some(path);
+    let suffix = match status {
+        Some(status) if status.available => "  [ready]",
+        Some(_) => "  [offline]",
+        None => "",
+    };
     let response = ui.selectable_label(
         selected,
-        egui::RichText::new(truncate_str(&source.name, 22))
+        egui::RichText::new(format!("{}{}", truncate_str(&source.name, 17), suffix))
             .size(12.5)
             .color(if selected {
                 palette.accent
+            } else if status.is_some_and(|status| !status.available) {
+                palette.error
             } else {
                 palette.text_primary
             }),
     );
-    response.on_hover_text(&source.path)
+    response.on_hover_text(
+        status
+            .map(|status| {
+                format!(
+                    "{}\n{}\n{}",
+                    status.name,
+                    status.path.display(),
+                    status.last_error.as_deref().unwrap_or(if status.available {
+                        "Available"
+                    } else {
+                        "Unavailable"
+                    })
+                )
+            })
+            .unwrap_or_else(|| source.path.clone()),
+    )
 }

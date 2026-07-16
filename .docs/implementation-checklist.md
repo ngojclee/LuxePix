@@ -80,21 +80,21 @@ This checklist follows:
 
 ## E4 - Index And Product-Code Search
 
-- [ ] Add configured sources and source availability state.
-- [ ] Add per-source prefix/regex product-code extraction.
-- [ ] Add local SQLite schema and migrations.
-- [ ] Build the initial index asynchronously in bounded batches.
-- [ ] Add incremental updates for local filesystems.
+- [x] Add configured sources and source availability state.
+- [x] Add per-source prefix/regex product-code extraction.
+- [x] Add local SQLite schema and migrations.
+- [x] Build the initial index asynchronously in bounded batches.
+- [x] Add incremental updates for local filesystems.
 - [!] Validate network-share watching and define polling reconciliation.
-- [ ] Add pause, resume, rebuild, progress, and corruption recovery.
-- [ ] Add Quick Find `starts with` matching.
-- [ ] Select and scroll to result one while typing without opening it.
-- [ ] Show top 10 product-folder matches.
-- [ ] Add clearly separated Contains and Fuzzy fallbacks.
-- [ ] Add Current, Current Source, and All Sources scopes.
-- [ ] Reveal the selected result in its parent folder.
-- [ ] Group multiple images into one product result card.
-- [ ] Meet the 100,000-file p95 search target.
+- [x] Add pause, resume, rebuild, progress, and corruption recovery.
+- [x] Add Quick Find `starts with` matching.
+- [x] Select and scroll to result one while typing without opening it.
+- [x] Show top 10 product-folder matches.
+- [x] Add clearly separated Contains and Fuzzy fallbacks.
+- [x] Add Current, Current Source, and All Sources scopes.
+- [x] Reveal the selected result in its parent folder.
+- [x] Group multiple images into one product result card.
+- [x] Meet the 100,000-file p95 search target.
 
 ## E5 - Find Product By Image
 
@@ -143,7 +143,7 @@ This checklist follows:
 
 - [~] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, and versions.
 - [x] Add temp-directory integration tests for file operations and Undo.
-- [ ] Add SQLite migration, rebuild, and search tests.
+- [x] Add SQLite migration, rebuild, and search tests.
 - [ ] Add pHash grouping and ranking tests.
 - [ ] Add portable updater transaction and rollback tests.
 - [ ] Capture Light/Dark/System screenshots.
@@ -151,7 +151,7 @@ This checklist follows:
 - [ ] Smoke-test installer and portable build in Windows Sandbox.
 - [ ] Verify first window appears within 1.5 seconds on the reference machine.
 - [ ] Verify 2,000-item folder metadata is usable within 300 ms.
-- [ ] Verify 100,000-entry prefix search is below 100 ms at p95.
+- [x] Verify 100,000-entry prefix search is below 100 ms at p95.
 - [ ] Verify thumbnail memory stays inside the configured byte budget.
 - [ ] Confirm no image upload, telemetry, or persistent diagnostic logs.
 
@@ -203,3 +203,18 @@ This checklist follows:
   Manual Explorer clipboard round-trip and Recycle Bin smoke verification
   remain open; outbound OLE drag and exact Recycle Bin restore remain
   feasibility spikes.
+- 2026-07-16: Completed E4 with mode-aware SQLite WAL storage, schema
+  migration and corrupt-database recovery, asynchronous 100-product batches,
+  operation-triggered and scheduled reconciliation, source availability,
+  per-source folder/prefix/regex extraction, and pause/resume/rebuild controls.
+- 2026-07-16: Quick Find verification passed for strict prefix results,
+  separate Contains/Fuzzy fallbacks, Current/Current Source/All Sources
+  scopes, ten-result limits, grouped product images, and automatic
+  select/scroll/reveal of result one without opening the product folder.
+- 2026-07-16: E4 automated gates passed with format, strict Clippy, 52 regular
+  tests, SQLite migration/rebuild/reconciliation/search tests, a locked
+  release build, and the ignored release-mode 100,000-product p95 performance
+  gate. A portable light-theme smoke indexed three product folders and six
+  images, opened Quick Find with Ctrl+F, matched `104`, and selected
+  `SKU-1042 Blue Chrome` in place. Native network-share watcher validation
+  remains a feasibility item; bounded per-source polling is implemented.

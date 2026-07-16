@@ -9,7 +9,7 @@ use crate::commands::CommandId;
 use crate::model::{SortDirection, SortField, ViewMode};
 use crate::storage::{transactional_write, StoragePaths};
 
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 const MAX_HISTORY: usize = 50;
 const SHORTCUT_PROFILE_VERSION: u32 = 1;
 
@@ -48,6 +48,30 @@ pub struct SourceConfig {
     pub name: String,
     pub path: String,
     pub favorite: bool,
+    pub code_mode: ProductCodeMode,
+    pub code_pattern: String,
+    pub reconciliation_minutes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductCodeMode {
+    #[default]
+    FolderName,
+    Prefix,
+    Regex,
+}
+
+impl ProductCodeMode {
+    pub const ALL: [Self; 3] = [Self::FolderName, Self::Prefix, Self::Regex];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FolderName => "Folder name",
+            Self::Prefix => "Fixed prefix",
+            Self::Regex => "Regular expression",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -114,6 +138,9 @@ impl Default for SourceConfig {
             name: "Products".into(),
             path: String::new(),
             favorite: false,
+            code_mode: ProductCodeMode::FolderName,
+            code_pattern: String::new(),
+            reconciliation_minutes: 5,
         }
     }
 }
@@ -317,6 +344,7 @@ impl AppConfig {
             name,
             path: path_value,
             favorite: self.sources.is_empty(),
+            ..SourceConfig::default()
         });
         let _ = self.save();
     }
@@ -382,6 +410,8 @@ impl AppConfig {
         for source in &mut self.sources {
             source.path = source.path.trim().to_string();
             source.name = source.name.trim().to_string();
+            source.code_pattern = source.code_pattern.trim().to_string();
+            source.reconciliation_minutes = source.reconciliation_minutes.clamp(1, 1_440);
             if source.name.is_empty() {
                 source.name = Path::new(&source.path)
                     .file_name()
@@ -604,12 +634,16 @@ mod tests {
 
         let loaded = AppConfig::load(&paths);
 
-        assert_eq!(loaded.schema_version, 5);
+        assert_eq!(loaded.schema_version, 6);
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.similarity_result_count, 50);
         assert_eq!(loaded.sources.len(), 1);
         assert_eq!(loaded.sources[0].name, "Products");
         assert_eq!(loaded.sources[0].path, "N:/Products");
+        assert_eq!(
+            loaded.sources[0].code_mode,
+            super::ProductCodeMode::FolderName
+        );
         fs::remove_dir_all(paths.executable_dir).expect("remove test root");
     }
 

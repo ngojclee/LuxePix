@@ -5,8 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use eframe::egui;
 
 use crate::commands::{CommandContext, CommandId};
-use crate::config::{AppConfig, ShortcutConfig};
+use crate::config::{AppConfig, ProductCodeMode, ShortcutConfig};
 use crate::file_ops::{self, CollisionChoice, TransferMode, TransferPreparation, TransferRequest};
+use crate::index::{IndexEvent, IndexManager, IndexState};
 use crate::model::{FileEntry, FolderEntry, ItemId, SortDirection, SortField, ViewMode};
 use crate::navigation::NavigationHistory;
 use crate::operations::{
@@ -14,6 +15,7 @@ use crate::operations::{
     OperationState,
 };
 use crate::scanner::{format_size, ScanOptions};
+use crate::search::{ProductSearchResult, SearchManager, SearchResponse, SearchScope};
 use crate::selection::SelectionModel;
 use crate::sorting::{sort_files, sort_folders};
 use crate::storage::{transactional_write, StoragePaths};
@@ -25,6 +27,7 @@ use crate::windows_shell;
 mod details;
 mod explorer;
 mod first_run;
+mod quick_find;
 mod sidebar;
 
 // ── Preview state ──────────────────────────────────────────────
@@ -100,6 +103,8 @@ pub struct LuxePixApp {
     folder_scan_task: Option<TaskId>,
     operations: OperationManager,
     undo: UndoManager,
+    index: IndexManager,
+    search: SearchManager,
 
     // Rename state
     renaming: Option<RenameState>,
@@ -122,6 +127,19 @@ pub struct LuxePixApp {
     pending_delete: Option<PendingDelete>,
     internal_drag: Option<InternalDrag>,
     show_task_center: bool,
+    show_quick_find: bool,
+    quick_find_query: String,
+    quick_find_scope: QuickFindScope,
+    quick_find_results: SearchResponse,
+    quick_find_selected: usize,
+    quick_find_focus_requested: bool,
+    quick_find_dirty_since: Option<std::time::Instant>,
+    quick_find_running: bool,
+    pending_product_reveal: Option<PathBuf>,
+    quick_find_current_anchor: Option<PathBuf>,
+    quick_find_source_anchor: Option<String>,
+    pending_index_rebuild: bool,
+    pending_index_reconcile: bool,
 
     status: String,
 }
@@ -170,6 +188,26 @@ enum SettingsTab {
     Advanced,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum QuickFindScope {
+    #[default]
+    Current,
+    CurrentSource,
+    AllSources,
+}
+
+impl QuickFindScope {
+    const ALL: [Self; 3] = [Self::Current, Self::CurrentSource, Self::AllSources];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Current => "Current",
+            Self::CurrentSource => "Current Source",
+            Self::AllSources => "All Sources",
+        }
+    }
+}
+
 impl SettingsTab {
     const ALL: [Self; 6] = [
         Self::General,
@@ -201,6 +239,9 @@ impl LuxePixApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         let storage = StoragePaths::detect();
         let config = AppConfig::load(&storage);
+        let database_path = storage.index_dir.join("luxepix.db");
+        let index = IndexManager::new(database_path.clone(), config.indexing_enabled);
+        let search = SearchManager::new(crate::search::SearchEngine::new(database_path));
         let effective_theme = apply_theme(&cc.egui_ctx, &config.theme).to_string();
         let shortcut_draft = config.shortcuts.clone();
         let first_run_source = config
@@ -246,6 +287,8 @@ impl LuxePixApp {
             folder_scan_task: None,
             operations: OperationManager::new(),
             undo: UndoManager::default(),
+            index,
+            search,
             renaming: None,
             storage,
             config,
@@ -264,6 +307,19 @@ impl LuxePixApp {
             pending_delete: None,
             internal_drag: None,
             show_task_center: false,
+            show_quick_find: false,
+            quick_find_query: String::new(),
+            quick_find_scope: QuickFindScope::Current,
+            quick_find_results: SearchResponse::default(),
+            quick_find_selected: 0,
+            quick_find_focus_requested: false,
+            quick_find_dirty_since: None,
+            quick_find_running: false,
+            pending_product_reveal: None,
+            quick_find_current_anchor: None,
+            quick_find_source_anchor: None,
+            pending_index_rebuild: false,
+            pending_index_reconcile: false,
             status: "Ready. Pick a folder above or choose a recent path.".into(),
         };
 
@@ -531,6 +587,7 @@ impl LuxePixApp {
                             total_files
                         );
                     }
+                    self.apply_pending_product_reveal(&path);
                 }
                 TaskEvent::FolderScanned { id, path, files }
                     if self.folder_scan_task == Some(id)
@@ -589,6 +646,215 @@ impl LuxePixApp {
                 _ => {}
             }
         }
+    }
+
+    fn process_index_events(&mut self) {
+        for event in self.index.drain(64) {
+            match event {
+                IndexEvent::SourceAvailability {
+                    source,
+                    available: false,
+                    error,
+                    ..
+                } => {
+                    self.status = format!(
+                        "{} is unavailable for indexing: {}",
+                        source.name,
+                        error.unwrap_or_else(|| "source could not be opened".into())
+                    );
+                }
+                IndexEvent::Completed {
+                    cancelled: false, ..
+                } => {
+                    let snapshot = self.index.snapshot();
+                    self.status = format!(
+                        "Search index ready: {} product folder(s), {} image(s).",
+                        snapshot.products_indexed, snapshot.images_indexed
+                    );
+                    if !self.quick_find_query.trim().is_empty() {
+                        self.queue_quick_find_search();
+                    }
+                }
+                IndexEvent::Completed {
+                    cancelled: true, ..
+                } => {
+                    self.status = "Search indexing stopped.".into();
+                }
+                IndexEvent::Failed { error, .. } => {
+                    self.status = format!("Search index failed: {error}");
+                }
+                IndexEvent::SourceAvailability { .. }
+                | IndexEvent::Progress { .. }
+                | IndexEvent::SourceCompleted { .. } => {}
+            }
+        }
+    }
+
+    fn maintain_index(&mut self) {
+        if !self.config.indexing_enabled {
+            return;
+        }
+        if self.index.is_active() {
+            return;
+        }
+        if self.pending_index_rebuild {
+            match self
+                .index
+                .start_reconcile(self.config.sources.clone(), true)
+            {
+                Ok(()) => {
+                    self.pending_index_rebuild = false;
+                    self.pending_index_reconcile = false;
+                }
+                Err(error) => self.status = format!("Could not rebuild search index: {error}"),
+            }
+            return;
+        }
+        if self.pending_index_reconcile {
+            match self
+                .index
+                .start_reconcile(self.config.sources.clone(), false)
+            {
+                Ok(()) => self.pending_index_reconcile = false,
+                Err(error) => self.status = format!("Could not refresh search index: {error}"),
+            }
+            return;
+        }
+        if let Err(error) = self.index.reconcile_if_due(&self.config.sources) {
+            if self.index.snapshot().state != IndexState::Failed {
+                self.status = format!("Could not start search indexing: {error}");
+            }
+        }
+    }
+
+    fn request_index_rebuild(&mut self) {
+        if self.config.indexing_enabled {
+            self.pending_index_rebuild = true;
+        }
+    }
+
+    fn request_index_reconcile(&mut self) {
+        if self.config.indexing_enabled && !self.pending_index_rebuild {
+            self.pending_index_reconcile = true;
+        }
+    }
+
+    fn process_search_events(&mut self) {
+        for completion in self.search.drain_latest(8) {
+            if completion.query != self.quick_find_query.trim() {
+                continue;
+            }
+            self.quick_find_running = false;
+            match completion.result {
+                Ok(results) => {
+                    self.quick_find_results = results;
+                    self.quick_find_selected = 0;
+                    if let Some(first) = self.quick_find_results.first().cloned() {
+                        self.reveal_search_result(&first);
+                    }
+                }
+                Err(error) => {
+                    self.quick_find_results = SearchResponse::default();
+                    self.status = format!("Quick Find failed: {error}");
+                }
+            }
+        }
+    }
+
+    fn queue_quick_find_search(&mut self) {
+        self.quick_find_dirty_since = Some(std::time::Instant::now());
+        self.quick_find_running = !self.quick_find_query.trim().is_empty();
+        if self.quick_find_query.trim().is_empty() {
+            self.quick_find_results = SearchResponse::default();
+            self.quick_find_running = false;
+        }
+    }
+
+    fn submit_quick_find_if_ready(&mut self) {
+        let Some(dirty_since) = self.quick_find_dirty_since else {
+            return;
+        };
+        if dirty_since.elapsed() < std::time::Duration::from_millis(120) {
+            return;
+        }
+        self.quick_find_dirty_since = None;
+        let query = self.quick_find_query.trim().to_string();
+        if query.is_empty() {
+            self.quick_find_results = SearchResponse::default();
+            self.quick_find_running = false;
+            return;
+        }
+        let scope = self.resolved_search_scope();
+        self.search.submit(query, scope, 10);
+        self.quick_find_running = true;
+    }
+
+    fn resolved_search_scope(&self) -> SearchScope {
+        match self.quick_find_scope {
+            QuickFindScope::Current => self
+                .quick_find_current_anchor
+                .clone()
+                .or_else(|| self.current_path.clone())
+                .map(SearchScope::Current)
+                .unwrap_or(SearchScope::AllSources),
+            QuickFindScope::CurrentSource => self
+                .quick_find_source_anchor
+                .clone()
+                .or_else(|| self.current_source_path())
+                .map(SearchScope::CurrentSource)
+                .unwrap_or(SearchScope::AllSources),
+            QuickFindScope::AllSources => SearchScope::AllSources,
+        }
+    }
+
+    fn current_source_path(&self) -> Option<String> {
+        let current = self.current_path.as_ref()?;
+        let current_key = crate::search::normalize_path_key(current);
+        self.config
+            .sources
+            .iter()
+            .filter(|source| {
+                let source_key = crate::search::normalize_path_key(Path::new(&source.path));
+                current_key == source_key || current_key.starts_with(&format!("{source_key}/"))
+            })
+            .max_by_key(|source| crate::search::normalize_path_key(Path::new(&source.path)).len())
+            .map(|source| source.path.clone())
+    }
+
+    fn reveal_search_result(&mut self, result: &ProductSearchResult) {
+        let folder_path = result.folder_path.clone();
+        let Some(parent) = folder_path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        self.pending_product_reveal = Some(folder_path);
+        if self.current_path.as_ref() == Some(&parent) {
+            self.apply_pending_product_reveal(&parent);
+        } else {
+            self.navigate_to(parent);
+        }
+    }
+
+    fn apply_pending_product_reveal(&mut self, parent: &Path) {
+        let Some(target) = self.pending_product_reveal.clone() else {
+            return;
+        };
+        if target.parent() != Some(parent) || self.current_path.as_deref() != Some(parent) {
+            return;
+        }
+        let Some(id) = self
+            .folders
+            .iter()
+            .find(|folder| folder.path == target)
+            .map(|folder| folder.id.clone())
+        else {
+            return;
+        };
+
+        self.pending_product_reveal = None;
+        self.folder_selection.replace(id.clone());
+        self.pending_folder_scroll_to = Some(id.clone());
+        self.active_pane = ExplorerPane::Folders;
+        self.activate_folder(id);
     }
 
     fn navigate_back(&mut self) {
@@ -695,6 +961,7 @@ impl LuxePixApp {
                         }
                         self.folder_selection.replace_id(&old_id, new_id.clone());
                         self.file_selection.replace_id(&old_id, new_id);
+                        self.request_index_reconcile();
                         self.refresh_current_view();
                     }
                     Err(e) => self.status = format!("Rename failed: {}", e),
@@ -914,10 +1181,13 @@ impl LuxePixApp {
             }
             CommandId::Undo => self.undo_latest_operation(),
             CommandId::Find => {
-                self.status = format!(
-                    "{} is registered and will be enabled with its explorer feature.",
-                    command.short_label()
-                );
+                if !self.show_quick_find {
+                    self.quick_find_current_anchor = self.current_path.clone();
+                    self.quick_find_source_anchor = self.current_source_path();
+                }
+                self.show_quick_find = true;
+                self.quick_find_focus_requested = true;
+                self.queue_quick_find_search();
             }
         }
     }
@@ -1195,6 +1465,7 @@ impl LuxePixApp {
         match self.undo.undo_latest() {
             Ok(_) => {
                 self.status = format!("{label} completed.");
+                self.request_index_reconcile();
                 self.refresh_current_view();
             }
             Err(error) => {
@@ -1269,6 +1540,7 @@ impl LuxePixApp {
                             "Operation completed for {completed} item(s). Replaced items are not automatically undoable."
                         )
                     };
+                    self.request_index_reconcile();
                     self.refresh_current_view();
                     self.status = status;
                 }
@@ -1277,6 +1549,7 @@ impl LuxePixApp {
                         "Moved {} item(s) to Recycle Bin. Restore them from Windows Recycle Bin if needed.",
                         paths.len()
                     );
+                    self.request_index_reconcile();
                     self.refresh_current_view();
                     self.status = status;
                 }
@@ -1292,6 +1565,7 @@ impl LuxePixApp {
                             outcome.errors.len()
                         )
                     };
+                    self.request_index_reconcile();
                     self.refresh_current_view();
                     self.status = status;
                 }
@@ -1410,6 +1684,10 @@ impl eframe::App for LuxePixApp {
 
         self.process_task_events();
         self.process_operation_events();
+        self.process_index_events();
+        self.maintain_index();
+        self.submit_quick_find_if_ready();
+        self.process_search_events();
 
         // Process thumbnail results
         let loaded_thumbs = self.thumb_mgr.process_results(ctx);
@@ -1539,6 +1817,10 @@ impl eframe::App for LuxePixApp {
             self.render_settings_window(ctx);
         }
 
+        if self.show_quick_find {
+            self.render_quick_find_window(ctx);
+        }
+
         if self.pending_delete.is_some() {
             self.render_delete_confirmation(ctx);
         }
@@ -1563,7 +1845,12 @@ impl eframe::App for LuxePixApp {
         if !self.thumb_mgr.is_idle() || !self.full_mgr.is_idle() {
             ctx.request_repaint();
         }
-        if self.tasks.active_count() > 0 || self.operations.active_count() > 0 {
+        if self.tasks.active_count() > 0
+            || self.operations.active_count() > 0
+            || self.index.is_active()
+            || self.quick_find_running
+            || self.quick_find_dirty_since.is_some()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
@@ -1766,6 +2053,19 @@ impl LuxePixApp {
                 if self.current_path.as_ref() != Some(&target) {
                     self.navigate_to(target);
                 }
+            }
+
+            if icon_button(
+                ui,
+                IconKind::Search,
+                Some("Find"),
+                "Quick Find (Ctrl+F)",
+                self.show_quick_find,
+                &palette,
+            )
+            .clicked()
+            {
+                self.execute_command(CommandId::Find);
             }
 
             if icon_button(
@@ -2058,7 +2358,14 @@ impl LuxePixApp {
         let mut export_shortcuts = false;
         let mut config_changed = false;
         let mut hidden_files_changed = false;
+        let mut index_enabled_changed = false;
+        let mut index_rules_changed = false;
+        let mut rebuild_index = false;
+        let mut pause_index = false;
+        let mut resume_index = false;
+        let mut cancel_index = false;
         let mut close_window = false;
+        let index_snapshot = self.index.snapshot().clone();
 
         egui::Window::new("Settings")
             .open(&mut open)
@@ -2171,6 +2478,193 @@ impl LuxePixApp {
                         }
                         SettingsTab::SearchIndex => {
                             settings_heading(ui, "Search & Index", &palette);
+                            let enabled_response = ui.checkbox(
+                                &mut self.config.indexing_enabled,
+                                "Build and maintain a local product index",
+                            );
+                            index_enabled_changed |= enabled_response.changed();
+                            config_changed |= enabled_response.changed();
+                            ui.add_space(10.0);
+                            settings_value_row(
+                                ui,
+                                "Status",
+                                index_snapshot.state.label(),
+                                &palette,
+                            );
+                            settings_value_row(
+                                ui,
+                                "Products",
+                                &index_snapshot.products_indexed.to_string(),
+                                &palette,
+                            );
+                            settings_value_row(
+                                ui,
+                                "Images",
+                                &index_snapshot.images_indexed.to_string(),
+                                &palette,
+                            );
+                            if let Some(source) = &index_snapshot.current_source {
+                                settings_value_row(ui, "Current source", source, &palette);
+                            }
+                            if let Some(error) = &index_snapshot.last_error {
+                                ui.colored_label(palette.error, error);
+                            }
+                            if index_snapshot.recovered_corrupt_database {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "A damaged index was preserved and a clean database was created.",
+                                    )
+                                    .size(11.5)
+                                    .color(palette.warning),
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal_wrapped(|ui| {
+                                match index_snapshot.state {
+                                    IndexState::Indexing => {
+                                        if ui.button("Pause").clicked() {
+                                            pause_index = true;
+                                        }
+                                        if ui.button("Stop").clicked() {
+                                            cancel_index = true;
+                                        }
+                                    }
+                                    IndexState::Paused => {
+                                        if ui.button("Resume").clicked() {
+                                            resume_index = true;
+                                        }
+                                        if ui.button("Stop").clicked() {
+                                            cancel_index = true;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.config.indexing_enabled
+                                            && !matches!(
+                                                index_snapshot.state,
+                                                IndexState::Indexing | IndexState::Paused
+                                            ),
+                                        egui::Button::new("Rebuild Index"),
+                                    )
+                                    .clicked()
+                                {
+                                    rebuild_index = true;
+                                }
+                            });
+                            ui.add_space(16.0);
+                            settings_heading(ui, "Source Rules", &palette);
+                            if self.config.sources.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Add a source from the navigation sidebar.",
+                                    )
+                                    .color(palette.text_secondary),
+                                );
+                            }
+                            for (index, source) in self.config.sources.iter_mut().enumerate() {
+                                let source_key =
+                                    crate::search::normalize_path_key(Path::new(&source.path));
+                                let availability = index_snapshot
+                                    .sources
+                                    .get(&source_key)
+                                    .map(|status| {
+                                        if status.available {
+                                            format!(
+                                                "Available - {} products / {} images",
+                                                status.products_indexed, status.images_indexed
+                                            )
+                                        } else {
+                                            status
+                                                .last_error
+                                                .clone()
+                                                .unwrap_or_else(|| "Unavailable".into())
+                                        }
+                                    })
+                                    .unwrap_or_else(|| {
+                                        if Path::new(&source.path).is_dir() {
+                                            "Waiting for index".into()
+                                        } else {
+                                            "Unavailable".into()
+                                        }
+                                    });
+                                egui::CollapsingHeader::new(&source.name)
+                                    .id_salt(("source_rule", index))
+                                    .default_open(index == 0)
+                                    .show(ui, |ui| {
+                                        settings_path_row(
+                                            ui,
+                                            "Folder",
+                                            Path::new(&source.path),
+                                            &palette,
+                                        );
+                                        settings_value_row(
+                                            ui,
+                                            "Availability",
+                                            &availability,
+                                            &palette,
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label("Product code");
+                                            egui::ComboBox::from_id_salt((
+                                                "source_code_mode",
+                                                index,
+                                            ))
+                                            .selected_text(source.code_mode.label())
+                                            .show_ui(ui, |ui| {
+                                                for mode in ProductCodeMode::ALL {
+                                                    index_rules_changed |= ui
+                                                        .selectable_value(
+                                                            &mut source.code_mode,
+                                                            mode,
+                                                            mode.label(),
+                                                        )
+                                                        .changed();
+                                                }
+                                            });
+                                        });
+                                        if source.code_mode != ProductCodeMode::FolderName {
+                                            let hint = if source.code_mode
+                                                == ProductCodeMode::Prefix
+                                            {
+                                                "Prefix to remove, for example SKU"
+                                            } else {
+                                                "Regex; capture group 1 becomes the product code"
+                                            };
+                                            index_rules_changed |= ui
+                                                .add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut source.code_pattern,
+                                                    )
+                                                    .hint_text(hint)
+                                                    .desired_width(ui.available_width()),
+                                                )
+                                                .changed();
+                                        }
+                                        if let Err(error) =
+                                            crate::search::validate_extraction_rule(source)
+                                        {
+                                            ui.colored_label(palette.error, error);
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label("Reconcile every");
+                                            index_rules_changed |= ui
+                                                .add(
+                                                    egui::DragValue::new(
+                                                        &mut source.reconciliation_minutes,
+                                                    )
+                                                    .range(1..=1_440)
+                                                    .suffix(" min"),
+                                                )
+                                                .changed();
+                                        });
+                                    });
+                                ui.add_space(6.0);
+                            }
+                            config_changed |= index_rules_changed;
+                            ui.add_space(10.0);
                             ui.horizontal(|ui| {
                                 ui.label("Similarity results");
                                 config_changed |= ui
@@ -2305,6 +2799,41 @@ impl LuxePixApp {
         }
         if hidden_files_changed {
             self.refresh_current_view();
+        }
+        if index_enabled_changed {
+            match self.index.set_enabled(self.config.indexing_enabled) {
+                Ok(()) if self.config.indexing_enabled => self.request_index_rebuild(),
+                Ok(()) => {
+                    self.pending_index_rebuild = false;
+                    self.pending_index_reconcile = false;
+                }
+                Err(error) => {
+                    self.config.indexing_enabled = false;
+                    let _ = self.config.save();
+                    self.status = format!("Could not enable indexing: {error}");
+                }
+            }
+        }
+        if index_rules_changed || rebuild_index {
+            if let Some(error) = self
+                .config
+                .sources
+                .iter()
+                .find_map(|source| crate::search::validate_extraction_rule(source).err())
+            {
+                self.status = format!("Search index was not rebuilt: {error}");
+            } else {
+                self.request_index_rebuild();
+            }
+        }
+        if pause_index {
+            self.index.pause();
+        }
+        if resume_index {
+            self.index.resume();
+        }
+        if cancel_index {
+            self.index.cancel();
         }
 
         if close_window {
@@ -3867,6 +4396,7 @@ enum IconKind {
     Archive,
     Info,
     Edit,
+    Search,
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
@@ -4610,6 +5140,10 @@ fn draw_icon(
                 stroke,
             ));
             painter.line_segment([p(14.5, 7.0), p(17.0, 9.5)], stroke);
+        }
+        IconKind::Search => {
+            painter.circle_stroke(p(10.5, 10.5), rect.width() * 6.0 / 24.0, stroke);
+            painter.line_segment([p(15.0, 15.0), p(20.0, 20.0)], stroke);
         }
     }
 }
