@@ -23,8 +23,8 @@ This checklist follows:
 - [x] Add Windows CI for format, Clippy, tests, and release build.
 - [x] Make `cargo fmt --check` pass.
 - [x] Make `cargo clippy --all-targets -- -D warnings` pass.
-- [ ] Make `cargo test` pass with meaningful tests.
-- [ ] Confirm a clean source checkout can build.
+- [x] Make `cargo test` pass with meaningful tests.
+- [x] Confirm a clean source checkout can build.
 
 ## E1 - Core Architecture And Visual Shell
 
@@ -165,3 +165,6 @@ This checklist follows:
 - 2026-07-16: Rust `1.93.1` format and strict Clippy checks passed after
   baseline formatting and dead-code cleanup; `cargo test` still contains zero
   test cases.
+- 2026-07-16: Clean clone of commit `3307014` completed a locked release build.
+- 2026-07-16: Added baseline tests for image-extension detection and byte-size
+  formatting.

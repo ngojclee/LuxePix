@@ -123,3 +123,25 @@ pub fn format_size(bytes: u64) -> String {
         format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{format_size, is_image_file};
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_image_extensions_case_insensitively() {
+        assert!(is_image_file(Path::new("sample.JPEG")));
+        assert!(is_image_file(Path::new("preview.webp")));
+        assert!(!is_image_file(Path::new("notes.txt")));
+        assert!(!is_image_file(Path::new("no-extension")));
+    }
+
+    #[test]
+    fn formats_byte_sizes_at_unit_boundaries() {
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
+    }
+}
