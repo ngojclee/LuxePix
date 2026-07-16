@@ -16,13 +16,13 @@ This checklist follows:
 
 ## E0 - Repository And Reproducible Baseline
 
-- [~] Review ignore rules and exclude build/runtime artifacts.
-- [ ] Record the current source, design, docs, and wiki in a baseline commit.
-- [ ] Rename the default branch from `master` to `main`.
-- [ ] Create the `codex/luxepix-explorer` implementation branch.
-- [ ] Add Windows CI for format, Clippy, tests, and release build.
-- [ ] Make `cargo fmt --check` pass.
-- [ ] Make `cargo clippy --all-targets -- -D warnings` pass.
+- [x] Review ignore rules and exclude build/runtime artifacts.
+- [x] Record the current source, design, docs, and wiki in a baseline commit.
+- [x] Rename the default branch from `master` to `main`.
+- [x] Create the `codex/luxepix-explorer` implementation branch.
+- [x] Add Windows CI for format, Clippy, tests, and release build.
+- [x] Make `cargo fmt --check` pass.
+- [x] Make `cargo clippy --all-targets -- -D warnings` pass.
 - [ ] Make `cargo test` pass with meaningful tests.
 - [ ] Confirm a clean source checkout can build.
 
@@ -160,3 +160,8 @@ This checklist follows:
 - 2026-07-16: Planning wiki lint passed for 7 pages with 47 locked decisions.
 - 2026-07-16: Pre-implementation `cargo test` passed with zero tests and three
   existing dead-code warnings.
+- 2026-07-16: Baseline committed as `bc86613`; default branch renamed to
+  `main`; implementation branch created as `codex/luxepix-explorer`.
+- 2026-07-16: Rust `1.93.1` format and strict Clippy checks passed after
+  baseline formatting and dead-code cleanup; `cargo test` still contains zero
+  test cases.

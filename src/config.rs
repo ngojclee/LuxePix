@@ -68,19 +68,24 @@ impl AppConfig {
                     })
                     .unwrap_or_default();
 
-                let left_thumb = json.get("left_thumb_size")
+                let left_thumb = json
+                    .get("left_thumb_size")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(160.0) as f32;
-                let right_thumb = json.get("right_thumb_size")
+                let right_thumb = json
+                    .get("right_thumb_size")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(180.0) as f32;
-                let panel_w = json.get("left_panel_width")
+                let panel_w = json
+                    .get("left_panel_width")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(420.0) as f32;
-                let last = json.get("last_path")
+                let last = json
+                    .get("last_path")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let theme = json.get("theme")
+                let theme = json
+                    .get("theme")
                     .and_then(|v| v.as_str())
                     .filter(|v| *v == "light" || *v == "dark")
                     .unwrap_or("light")
@@ -134,11 +139,19 @@ impl AppConfig {
                 "settings": self.shortcuts.settings,
             },
         });
-        let _ = fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default());
+        let _ = fs::write(
+            &path,
+            serde_json::to_string_pretty(&json).unwrap_or_default(),
+        );
     }
 
     pub fn toggle_theme(&mut self) {
-        self.theme = if self.theme == "dark" { "light" } else { "dark" }.into();
+        self.theme = if self.theme == "dark" {
+            "light"
+        } else {
+            "dark"
+        }
+        .into();
         self.save();
     }
 

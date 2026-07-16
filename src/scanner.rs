@@ -22,28 +22,6 @@ pub struct FileEntry {
     pub size_bytes: u64,
 }
 
-impl FileEntry {
-    /// Icon for non-image file types.
-    pub fn icon(&self) -> &str {
-        match self.extension.as_str() {
-            "pdf" => "📕",
-            "doc" | "docx" | "rtf" | "odt" => "📝",
-            "xls" | "xlsx" | "csv" | "ods" => "📊",
-            "ppt" | "pptx" | "odp" => "📋",
-            "txt" | "log" | "md" => "📄",
-            "zip" | "rar" | "7z" | "tar" | "gz" => "📦",
-            "mp4" | "avi" | "mkv" | "mov" | "wmv" | "webm" => "🎬",
-            "mp3" | "wav" | "flac" | "ogg" | "aac" => "🎵",
-            "json" | "xml" | "yaml" | "yml" | "toml" => "⚙",
-            "py" | "rs" | "js" | "ts" | "html" | "css" => "💻",
-            "exe" | "msi" | "bat" | "cmd" | "ps1" => "⚡",
-            "psd" | "ai" | "svg" | "eps" => "🎨",
-            "ttf" | "otf" | "woff" | "woff2" => "🔤",
-            _ => "📄",
-        }
-    }
-}
-
 pub fn is_image_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -131,15 +109,6 @@ pub fn list_all_files(path: &Path) -> Vec<FileEntry> {
     });
 
     files
-}
-
-/// List only image files in a directory (non-recursive), sorted naturally.
-pub fn list_images(path: &Path) -> Vec<PathBuf> {
-    list_all_files(path)
-        .into_iter()
-        .filter(|f| f.is_image)
-        .map(|f| f.path)
-        .collect()
 }
 
 /// Format bytes to human-readable size string.

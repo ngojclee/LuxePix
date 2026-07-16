@@ -120,19 +120,11 @@ impl ThumbManager {
         self.cache.get(path).and_then(|e| e.original_size)
     }
 
-    pub fn is_pending(&self, path: &Path) -> bool {
-        self.pending.contains(path)
-    }
-
     pub fn clear(&mut self) {
         self.cache.clear();
         self.pending.clear();
         // drain the channel
         while self.result_rx.try_recv().is_ok() {}
-    }
-
-    pub fn has(&self, path: &Path) -> bool {
-        self.cache.contains_key(path)
     }
 
     pub fn is_idle(&self) -> bool {

@@ -4,7 +4,7 @@ use std::{fs, io};
 use eframe::egui;
 
 use crate::config::{AppConfig, ShortcutConfig};
-use crate::scanner::{self, FileEntry, FolderEntry, format_size};
+use crate::scanner::{self, format_size, FileEntry, FolderEntry};
 use crate::thumbs::ThumbManager;
 
 // ── Preview state ──────────────────────────────────────────────
@@ -114,7 +114,8 @@ impl LuxePixApp {
                 let total_imgs: usize = app.folders.iter().map(|f| f.image_count).sum();
                 app.status = format!(
                     "Restored {} folders and {} images from last path.",
-                    app.folders.len(), total_imgs
+                    app.folders.len(),
+                    total_imgs
                 );
             }
         }
@@ -141,7 +142,9 @@ impl LuxePixApp {
         let total_files: usize = self.folders.iter().map(|f| f.total_files).sum();
         self.status = format!(
             "Scanned {} folders, {} images and {} files.",
-            self.folders.len(), total_imgs, total_files
+            self.folders.len(),
+            total_imgs,
+            total_files
         );
     }
 
@@ -152,7 +155,9 @@ impl LuxePixApp {
         self.selected_folder = Some(idx);
         self.selected_file = None;
         self.right_files = scanner::list_all_files(&self.folders[idx].path);
-        self.right_image_paths = self.right_files.iter()
+        self.right_image_paths = self
+            .right_files
+            .iter()
             .filter(|f| f.is_image)
             .map(|f| f.path.clone())
             .collect();
@@ -169,10 +174,16 @@ impl LuxePixApp {
     fn execute_rename(&mut self) {
         if let Some(rename) = self.renaming.take() {
             let new_name = rename.new_name.trim().to_string();
-            let old_name = rename.original_path.file_name()
-                .unwrap_or_default().to_string_lossy().to_string();
+            let old_name = rename
+                .original_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if !new_name.is_empty() && new_name != old_name {
-                let parent = rename.original_path.parent()
+                let parent = rename
+                    .original_path
+                    .parent()
                     .unwrap_or(&rename.original_path);
                 let new_path = parent.join(&new_name);
                 match std::fs::rename(&rename.original_path, &new_path) {
@@ -198,9 +209,7 @@ impl LuxePixApp {
     fn open_file_external(path: &std::path::Path) {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("explorer")
-                .arg(path)
-                .spawn();
+            let _ = std::process::Command::new("explorer").arg(path).spawn();
         }
     }
 
@@ -253,7 +262,10 @@ impl LuxePixApp {
                     self.status = "Select a file or folder first.".into();
                 } else {
                     let count = paths.len();
-                    self.clipboard = Some(FileClipboard { paths, mode: ClipboardMode::Copy });
+                    self.clipboard = Some(FileClipboard {
+                        paths,
+                        mode: ClipboardMode::Copy,
+                    });
                     self.status = format!("Copied {} item(s) to LuxePix clipboard.", count);
                 }
             }
@@ -263,7 +275,10 @@ impl LuxePixApp {
                     self.status = "Select a file or folder first.".into();
                 } else {
                     let count = paths.len();
-                    self.clipboard = Some(FileClipboard { paths, mode: ClipboardMode::Cut });
+                    self.clipboard = Some(FileClipboard {
+                        paths,
+                        mode: ClipboardMode::Cut,
+                    });
                     self.status = format!("Cut {} item(s). Paste to move.", count);
                 }
             }
@@ -303,7 +318,9 @@ impl LuxePixApp {
         if let Some(idx) = self.selected_file {
             if let Some(file) = self.right_files.get(idx) {
                 if file.is_image {
-                    if let Some(img_idx) = self.right_image_paths.iter().position(|p| p == &file.path) {
+                    if let Some(img_idx) =
+                        self.right_image_paths.iter().position(|p| p == &file.path)
+                    {
                         let p = self.right_image_paths[img_idx].clone();
                         self.full_mgr.request_full(&p);
                         self.preview = Some(PreviewState {
@@ -346,7 +363,9 @@ impl LuxePixApp {
         let mut last_error: Option<String> = None;
 
         for src in &paths {
-            let Some(name) = src.file_name() else { continue };
+            let Some(name) = src.file_name() else {
+                continue;
+            };
             let dst = unique_destination(&target_dir.join(name));
             let result = match mode {
                 ClipboardMode::Copy => copy_path(src, &dst),
@@ -365,7 +384,11 @@ impl LuxePixApp {
         if let Some(err) = last_error {
             self.status = format!("Pasted {} item(s), last error: {}", completed, err);
         } else {
-            self.status = format!("Pasted {} item(s) into {}.", completed, target_dir.display());
+            self.status = format!(
+                "Pasted {} item(s) into {}.",
+                completed,
+                target_dir.display()
+            );
         }
     }
 
@@ -457,15 +480,22 @@ impl eframe::App for LuxePixApp {
                     .max(1.0) as i32;
 
                 let mut delta: Option<i32> = None;
-                if key_left { delta = Some(-1); }
-                if key_right { delta = Some(1); }
-                if key_up { delta = Some(-left_cols); }
-                if key_down { delta = Some(left_cols); }
+                if key_left {
+                    delta = Some(-1);
+                }
+                if key_right {
+                    delta = Some(1);
+                }
+                if key_up {
+                    delta = Some(-left_cols);
+                }
+                if key_down {
+                    delta = Some(left_cols);
+                }
 
                 if let Some(d) = delta {
                     let current = self.selected_folder.unwrap_or(0) as i32;
-                    let new_idx = (current + d)
-                        .clamp(0, self.folders.len() as i32 - 1) as usize;
+                    let new_idx = (current + d).clamp(0, self.folders.len() as i32 - 1) as usize;
                     self.select_folder(new_idx);
                 }
 
@@ -489,8 +519,8 @@ impl eframe::App for LuxePixApp {
                     .inner_margin(egui::Margin::symmetric(16.0, 0.0)),
             )
             .show(ctx, |ui| {
-            self.render_address_bar(ui);
-        });
+                self.render_address_bar(ui);
+            });
 
         if self.show_history {
             self.render_history_popover(ctx);
@@ -525,14 +555,14 @@ impl eframe::App for LuxePixApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(palette.canvas))
             .show(ctx, |ui| {
-            if self.selected_folder.is_some() {
-                self.render_right_pane(ui, ctx);
-            } else if self.current_path.is_none() {
-                self.render_initial_state(ui);
-            } else {
-                self.render_select_folder_state(ui);
-            }
-        });
+                if self.selected_folder.is_some() {
+                    self.render_right_pane(ui, ctx);
+                } else if self.current_path.is_none() {
+                    self.render_initial_state(ui);
+                } else {
+                    self.render_select_folder_state(ui);
+                }
+            });
 
         // ── Preview overlay ──
         if self.preview.is_some() {
@@ -550,11 +580,8 @@ impl eframe::App for LuxePixApp {
         // (Rename is now inline in panes — no separate dialog needed)
 
         // ── Save UI state periodically ──
-        self.config.save_ui_state(
-            self.left_thumb_size,
-            self.right_thumb_size,
-            new_panel_w,
-        );
+        self.config
+            .save_ui_state(self.left_thumb_size, self.right_thumb_size, new_panel_w);
 
         // Request repaint if there are pending thumbnails
         if !self.thumb_mgr.is_idle() || !self.full_mgr.is_idle() {
@@ -571,9 +598,17 @@ impl LuxePixApp {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
 
-            let mark_rect = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover()).0;
+            let mark_rect = ui
+                .allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover())
+                .0;
             ui.painter().rect_filled(mark_rect, 7.0, palette.accent);
-            draw_icon(ui.painter(), IconKind::Image, mark_rect.shrink(6.0), egui::Color32::WHITE, 1.6);
+            draw_icon(
+                ui.painter(),
+                IconKind::Image,
+                mark_rect.shrink(6.0),
+                egui::Color32::WHITE,
+                1.6,
+            );
             ui.label(
                 egui::RichText::new("LuxePix")
                     .size(14.0)
@@ -582,7 +617,9 @@ impl LuxePixApp {
             );
 
             ui.add_space(6.0);
-            let sep = ui.allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover()).0;
+            let sep = ui
+                .allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover())
+                .0;
             ui.painter().rect_filled(sep, 0.0, palette.border_soft);
             ui.add_space(4.0);
 
@@ -598,8 +635,16 @@ impl LuxePixApp {
                     ui.set_width(path_width);
                     ui.set_height(34.0);
                     ui.horizontal_centered(|ui| {
-                        let icon_rect = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover()).0;
-                        draw_icon(ui.painter(), IconKind::FolderOpen, icon_rect, palette.text_tertiary, 1.6);
+                        let icon_rect = ui
+                            .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover())
+                            .0;
+                        draw_icon(
+                            ui.painter(),
+                            IconKind::FolderOpen,
+                            icon_rect,
+                            palette.text_tertiary,
+                            1.6,
+                        );
                         ui.add_space(2.0);
                         let resp = ui.add_sized(
                             [ui.available_width(), 26.0],
@@ -624,13 +669,31 @@ impl LuxePixApp {
                 }
             }
 
-            if icon_button(ui, IconKind::FolderOpen, Some("Browse"), "Browse for folder", false, &palette).clicked() {
+            if icon_button(
+                ui,
+                IconKind::FolderOpen,
+                Some("Browse"),
+                "Browse for folder",
+                false,
+                &palette,
+            )
+            .clicked()
+            {
                 if let Some(p) = rfd::FileDialog::new().pick_folder() {
                     self.navigate_to(p);
                 }
             }
 
-            if icon_button(ui, IconKind::History, None, "Recent paths", self.show_history, &palette).clicked() {
+            if icon_button(
+                ui,
+                IconKind::History,
+                None,
+                "Recent paths",
+                self.show_history,
+                &palette,
+            )
+            .clicked()
+            {
                 self.show_history = !self.show_history;
             }
 
@@ -642,14 +705,31 @@ impl LuxePixApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let theme_icon = if self.config.theme == "dark" { IconKind::Sun } else { IconKind::Moon };
-                let tip = if self.config.theme == "dark" { "Switch to light theme" } else { "Switch to dark theme" };
+                let theme_icon = if self.config.theme == "dark" {
+                    IconKind::Sun
+                } else {
+                    IconKind::Moon
+                };
+                let tip = if self.config.theme == "dark" {
+                    "Switch to light theme"
+                } else {
+                    "Switch to dark theme"
+                };
                 if icon_button(ui, theme_icon, None, tip, false, &palette).clicked() {
                     self.config.toggle_theme();
                     apply_theme(ui.ctx(), &self.config.theme);
                     self.status = format!("Switched to {} theme.", self.config.theme);
                 }
-                if icon_button(ui, IconKind::Settings, None, "Settings", self.show_settings, &palette).clicked() {
+                if icon_button(
+                    ui,
+                    IconKind::Settings,
+                    None,
+                    "Settings",
+                    self.show_settings,
+                    &palette,
+                )
+                .clicked()
+                {
                     self.show_settings = true;
                 }
             });
@@ -686,7 +766,10 @@ impl LuxePixApp {
                             ui.add_space(8.0);
                             let sep = ui.available_rect_before_wrap();
                             ui.painter().line_segment(
-                                [egui::pos2(sep.left(), sep.top()), egui::pos2(sep.right(), sep.top())],
+                                [
+                                    egui::pos2(sep.left(), sep.top()),
+                                    egui::pos2(sep.right(), sep.top()),
+                                ],
                                 egui::Stroke::new(1.0, palette.border_soft),
                             );
                             ui.add_space(1.0);
@@ -694,7 +777,11 @@ impl LuxePixApp {
                             if self.config.path_history.is_empty() {
                                 ui.add_space(16.0);
                                 ui.centered_and_justified(|ui| {
-                                    ui.label(egui::RichText::new("No recent paths yet").size(12.0).color(palette.text_tertiary));
+                                    ui.label(
+                                        egui::RichText::new("No recent paths yet")
+                                            .size(12.0)
+                                            .color(palette.text_tertiary),
+                                    );
                                 });
                                 ui.add_space(16.0);
                             } else {
@@ -708,13 +795,23 @@ impl LuxePixApp {
                                                 egui::Sense::click(),
                                             );
                                             if resp.hovered() {
-                                                ui.painter().rect_filled(rect, 0.0, palette.surface_inset);
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    0.0,
+                                                    palette.surface_inset,
+                                                );
                                             }
                                             let icon_rect = egui::Rect::from_min_size(
                                                 rect.min + egui::vec2(14.0, 11.0),
                                                 egui::vec2(14.0, 14.0),
                                             );
-                                            draw_icon(ui.painter(), IconKind::Folder, icon_rect, palette.text_tertiary, 1.5);
+                                            draw_icon(
+                                                ui.painter(),
+                                                IconKind::Folder,
+                                                icon_rect,
+                                                palette.text_tertiary,
+                                                1.5,
+                                            );
                                             let text_rect = egui::Rect::from_min_max(
                                                 rect.min + egui::vec2(38.0, 0.0),
                                                 rect.max - egui::vec2(42.0, 0.0),
@@ -731,10 +828,24 @@ impl LuxePixApp {
                                                 rect.right_center() - egui::vec2(20.0, 0.0),
                                                 egui::vec2(24.0, 24.0),
                                             );
-                                            let rem_resp = ui.interact(remove_rect, ui.id().with(("hist_rm", path_str)), egui::Sense::click());
+                                            let rem_resp = ui.interact(
+                                                remove_rect,
+                                                ui.id().with(("hist_rm", path_str)),
+                                                egui::Sense::click(),
+                                            );
                                             if rem_resp.hovered() {
-                                                ui.painter().rect_filled(remove_rect, 4.0, palette.surface_inset);
-                                                draw_icon(ui.painter(), IconKind::Close, remove_rect.shrink(7.0), palette.error, 1.6);
+                                                ui.painter().rect_filled(
+                                                    remove_rect,
+                                                    4.0,
+                                                    palette.surface_inset,
+                                                );
+                                                draw_icon(
+                                                    ui.painter(),
+                                                    IconKind::Close,
+                                                    remove_rect.shrink(7.0),
+                                                    palette.error,
+                                                    1.6,
+                                                );
                                             }
                                             if rem_resp.clicked() {
                                                 remove_path = Some(path_str.clone());
@@ -743,7 +854,10 @@ impl LuxePixApp {
                                                 if p.is_dir() {
                                                     nav_to = Some(p);
                                                 } else {
-                                                    self.status = format!("Path not found or not accessible: {}", path_str);
+                                                    self.status = format!(
+                                                        "Path not found or not accessible: {}",
+                                                        path_str
+                                                    );
                                                 }
                                             }
                                         }
@@ -765,10 +879,17 @@ impl LuxePixApp {
         let palette = Palette::for_theme(&self.config.theme);
         ui.horizontal_centered(|ui| {
             let dot_color = status_color(&self.status, &palette);
-            let dot_rect = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover()).0;
-            ui.painter().circle_filled(dot_rect.center(), 3.0, dot_color);
+            let dot_rect = ui
+                .allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover())
+                .0;
+            ui.painter()
+                .circle_filled(dot_rect.center(), 3.0, dot_color);
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(&self.status).size(11.5).color(palette.text_secondary));
+            ui.label(
+                egui::RichText::new(&self.status)
+                    .size(11.5)
+                    .color(palette.text_secondary),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(path) = &self.current_path {
                     ui.label(
@@ -920,14 +1041,34 @@ impl LuxePixApp {
         let palette = Palette::for_theme(&self.config.theme);
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
-                let art = ui.allocate_exact_size(egui::vec2(76.0, 76.0), egui::Sense::hover()).0;
+                let art = ui
+                    .allocate_exact_size(egui::vec2(76.0, 76.0), egui::Sense::hover())
+                    .0;
                 ui.painter().rect_filled(art, 16.0, palette.surface_inset);
-                ui.painter().rect_stroke(art, 16.0, egui::Stroke::new(1.0, palette.border_soft));
-                draw_icon(ui.painter(), IconKind::Image, art.shrink(22.0), palette.text_tertiary, 1.7);
+                ui.painter()
+                    .rect_stroke(art, 16.0, egui::Stroke::new(1.0, palette.border_soft));
+                draw_icon(
+                    ui.painter(),
+                    IconKind::Image,
+                    art.shrink(22.0),
+                    palette.text_tertiary,
+                    1.7,
+                );
                 ui.add_space(16.0);
-                ui.label(egui::RichText::new("Select a folder to view its files").size(15.0).strong().color(palette.text_primary));
+                ui.label(
+                    egui::RichText::new("Select a folder to view its files")
+                        .size(15.0)
+                        .strong()
+                        .color(palette.text_primary),
+                );
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Use the folder tray on the left, or arrow keys and Enter.").size(12.5).color(palette.text_secondary));
+                ui.label(
+                    egui::RichText::new(
+                        "Use the folder tray on the left, or arrow keys and Enter.",
+                    )
+                    .size(12.5)
+                    .color(palette.text_secondary),
+                );
             });
         });
     }
@@ -954,22 +1095,40 @@ impl LuxePixApp {
                             .color(palette.text_secondary),
                     );
                     ui.add_space(8.0);
-                    if ui.add_enabled(has_selection, egui::Button::new("Open")).clicked() {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Open"))
+                        .clicked()
+                    {
                         self.execute_file_command(FileCommand::Open);
                     }
-                    if ui.add_enabled(has_selection, egui::Button::new("Copy")).clicked() {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Copy"))
+                        .clicked()
+                    {
                         self.execute_file_command(FileCommand::Copy);
                     }
-                    if ui.add_enabled(has_selection, egui::Button::new("Cut")).clicked() {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Cut"))
+                        .clicked()
+                    {
                         self.execute_file_command(FileCommand::Cut);
                     }
-                    if ui.add_enabled(self.clipboard.is_some(), egui::Button::new("Paste")).clicked() {
+                    if ui
+                        .add_enabled(self.clipboard.is_some(), egui::Button::new("Paste"))
+                        .clicked()
+                    {
                         self.execute_file_command(FileCommand::Paste);
                     }
-                    if ui.add_enabled(has_selection, egui::Button::new("Rename")).clicked() {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Rename"))
+                        .clicked()
+                    {
                         self.execute_file_command(FileCommand::Rename);
                     }
-                    if ui.add_enabled(has_selection, egui::Button::new("Delete")).clicked() {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Delete"))
+                        .clicked()
+                    {
                         self.execute_file_command(FileCommand::Delete);
                     }
                 });
@@ -990,7 +1149,13 @@ impl LuxePixApp {
         );
 
         if self.folders.is_empty() {
-            render_small_empty(ui, &palette, IconKind::Folder, "No subfolders found", "Choose another root folder or browse into this path.");
+            render_small_empty(
+                ui,
+                &palette,
+                IconKind::Folder,
+                "No subfolders found",
+                "Choose another root folder or browse into this path.",
+            );
             return;
         }
 
@@ -1015,10 +1180,8 @@ impl LuxePixApp {
                         let tile_w = thumb_size.clamp(116.0, 360.0);
                         let thumb_h = (tile_w * 0.75).max(86.0);
                         let tile_h = thumb_h + 58.0;
-                        let (rect, tile_resp) = ui.allocate_exact_size(
-                            egui::vec2(tile_w, tile_h),
-                            egui::Sense::click(),
-                        );
+                        let (rect, tile_resp) = ui
+                            .allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
 
                         if !ui.is_rect_visible(rect) {
                             if let Some(ref p) = folder.first_image {
@@ -1034,17 +1197,31 @@ impl LuxePixApp {
                         let is_sel = selected == Some(i);
                         paint_tile_shell(ui, rect, is_sel, tile_resp.hovered(), &palette);
 
-                        let t_rect = egui::Rect::from_min_size(rect.min, egui::vec2(tile_w, thumb_h));
-                        let thumb_resp = ui.interact(t_rect, ui.id().with(("lt", i)), egui::Sense::click());
+                        let t_rect =
+                            egui::Rect::from_min_size(rect.min, egui::vec2(tile_w, thumb_h));
+                        let thumb_resp =
+                            ui.interact(t_rect, ui.id().with(("lt", i)), egui::Sense::click());
 
                         if let Some(ref p) = folder.first_image {
                             if let Some(tex) = self.thumb_mgr.get(p) {
                                 paint_thumbnail(ui, tex, t_rect.shrink(1.0), &palette);
                             } else {
-                                paint_placeholder(ui, t_rect.shrink(1.0), IconKind::Loader, "Loading", &palette);
+                                paint_placeholder(
+                                    ui,
+                                    t_rect.shrink(1.0),
+                                    IconKind::Loader,
+                                    "Loading",
+                                    &palette,
+                                );
                             }
                         } else {
-                            paint_placeholder(ui, t_rect.shrink(1.0), IconKind::Folder, "", &palette);
+                            paint_placeholder(
+                                ui,
+                                t_rect.shrink(1.0),
+                                IconKind::Folder,
+                                "",
+                                &palette,
+                            );
                         }
 
                         if thumb_resp.clicked() || tile_resp.clicked() {
@@ -1105,14 +1282,20 @@ impl LuxePixApp {
                             }
                         } else {
                             let name_resp = ui.interact(
-                                name_rect, ui.id().with(("ln", i)), egui::Sense::click(),
+                                name_rect,
+                                ui.id().with(("ln", i)),
+                                egui::Sense::click(),
                             );
                             ui.painter().text(
                                 name_rect.left_center(),
                                 egui::Align2::LEFT_CENTER,
                                 truncate_str(&folder.name, 28),
                                 egui::FontId::proportional(13.0),
-                                if name_resp.hovered() { palette.accent } else { palette.text_primary },
+                                if name_resp.hovered() {
+                                    palette.accent
+                                } else {
+                                    palette.text_primary
+                                },
                             );
                             if name_resp.clicked() {
                                 start_rename = Some((folder.path.clone(), folder.name.clone()));
@@ -1158,7 +1341,8 @@ impl LuxePixApp {
 
     fn render_right_pane(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let palette = Palette::for_theme(&self.config.theme);
-        let folder_name = self.selected_folder
+        let folder_name = self
+            .selected_folder
             .and_then(|i| self.folders.get(i))
             .map(|f| f.name.as_str())
             .unwrap_or("");
@@ -1175,7 +1359,13 @@ impl LuxePixApp {
         self.render_file_action_bar(ui, &palette);
 
         if self.right_files.is_empty() {
-            render_small_empty(ui, &palette, IconKind::Image, "This folder is empty", "There are no images or other files here.");
+            render_small_empty(
+                ui,
+                &palette,
+                IconKind::Image,
+                "This folder is empty",
+                "There are no images or other files here.",
+            );
             return;
         }
 
@@ -1203,14 +1393,13 @@ impl LuxePixApp {
                         let tile_w = thumb_size.clamp(120.0, 420.0);
                         let info_h = 48.0;
                         let tile_h = tile_w + info_h;
-                        let (rect, tile_resp) = ui.allocate_exact_size(
-                            egui::vec2(tile_w, tile_h),
-                            egui::Sense::click(),
-                        );
+                        let (rect, tile_resp) = ui
+                            .allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
 
                         if !ui.is_rect_visible(rect) {
                             if file.is_image {
-                                self.thumb_mgr.request_thumbnail(&file.path, thumb_size as u32);
+                                self.thumb_mgr
+                                    .request_thumbnail(&file.path, thumb_size as u32);
                             }
                             continue;
                         }
@@ -1218,28 +1407,32 @@ impl LuxePixApp {
                         let is_selected = self.selected_file == Some(fi);
                         paint_tile_shell(ui, rect, is_selected, tile_resp.hovered(), &palette);
 
-                        let t_rect = egui::Rect::from_min_size(
-                            rect.min,
-                            egui::vec2(tile_w, tile_w),
-                        );
-                        let thumb_resp = ui.interact(
-                            t_rect, ui.id().with(("rt", fi)), egui::Sense::click(),
-                        );
+                        let t_rect =
+                            egui::Rect::from_min_size(rect.min, egui::vec2(tile_w, tile_w));
+                        let thumb_resp =
+                            ui.interact(t_rect, ui.id().with(("rt", fi)), egui::Sense::click());
 
                         if file.is_image {
-                            self.thumb_mgr.request_thumbnail(&file.path, thumb_size as u32);
+                            self.thumb_mgr
+                                .request_thumbnail(&file.path, thumb_size as u32);
                             if let Some(tex) = self.thumb_mgr.get(&file.path) {
                                 paint_thumbnail(ui, tex, t_rect.shrink(1.0), &palette);
                             } else {
-                                paint_placeholder(ui, t_rect.shrink(1.0), IconKind::Loader, "Loading", &palette);
+                                paint_placeholder(
+                                    ui,
+                                    t_rect.shrink(1.0),
+                                    IconKind::Loader,
+                                    "Loading",
+                                    &palette,
+                                );
                             }
 
                             if thumb_resp.clicked() || tile_resp.clicked() {
                                 self.selected_file = Some(fi);
                             }
                             if thumb_resp.double_clicked() || tile_resp.double_clicked() {
-                                if let Some(img_idx) = self.right_image_paths.iter()
-                                    .position(|p| p == &file.path)
+                                if let Some(img_idx) =
+                                    self.right_image_paths.iter().position(|p| p == &file.path)
                                 {
                                     open_preview = Some(img_idx);
                                 }
@@ -1309,27 +1502,34 @@ impl LuxePixApp {
                             }
                         } else {
                             let name_resp = ui.interact(
-                                name_rect, ui.id().with(("rn", fi)), egui::Sense::click(),
+                                name_rect,
+                                ui.id().with(("rn", fi)),
+                                egui::Sense::click(),
                             );
                             ui.painter().text(
                                 name_rect.left_center(),
                                 egui::Align2::LEFT_CENTER,
                                 truncate_str(&file.name, 30),
                                 egui::FontId::proportional(12.5),
-                                if name_resp.hovered() { palette.accent } else { palette.text_primary },
+                                if name_resp.hovered() {
+                                    palette.accent
+                                } else {
+                                    palette.text_primary
+                                },
                             );
                             if name_resp.clicked() {
-                                start_rename = Some((
-                                    file.path.clone(),
-                                    file.name.clone(),
-                                ));
+                                start_rename = Some((file.path.clone(), file.name.clone()));
                             }
                         }
 
                         let meta = if file.is_image {
                             format_size(file.size_bytes)
                         } else {
-                            format!("{} - {}", file.extension.to_uppercase(), format_size(file.size_bytes))
+                            format!(
+                                "{} - {}",
+                                file.extension.to_uppercase(),
+                                format_size(file.size_bytes)
+                            )
                         };
                         ui.painter().text(
                             egui::pos2(rect.min.x + 10.0, rect.max.y - 12.0),
@@ -1396,8 +1596,7 @@ impl LuxePixApp {
             if input.key_pressed(egui::Key::Escape) {
                 close = true;
             }
-            if input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown)
-            {
+            if input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown) {
                 nav = Some(1);
             }
             if input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp) {
@@ -1476,16 +1675,13 @@ impl LuxePixApp {
 
                 // Render image
                 let current_zoom = action_zoom.unwrap_or(pv_zoom);
-                let current_offset = pv_offset
-                    + action_drag_delta.unwrap_or(egui::Vec2::ZERO);
+                let current_offset = pv_offset + action_drag_delta.unwrap_or(egui::Vec2::ZERO);
 
                 if let Some(tex) = self.full_mgr.get(&pv_path) {
                     let tex_size = tex.size_vec2();
                     let margin = 128.0;
-                    let avail =
-                        egui::vec2(rect.width() - margin, rect.height() - margin - 80.0);
-                    let fit_scale =
-                        (avail.x / tex_size.x).min(avail.y / tex_size.y).min(1.0);
+                    let avail = egui::vec2(rect.width() - margin, rect.height() - margin - 80.0);
+                    let fit_scale = (avail.x / tex_size.x).min(avail.y / tex_size.y).min(1.0);
                     let display_size = tex_size * fit_scale * current_zoom;
 
                     let center = rect.center() + current_offset;
@@ -1494,29 +1690,35 @@ impl LuxePixApp {
                     let mut mesh = egui::Mesh::with_texture(tex.id());
                     mesh.add_rect_with_uv(
                         img_rect,
-                        egui::Rect::from_min_max(
-                            egui::pos2(0.0, 0.0),
-                            egui::pos2(1.0, 1.0),
-                        ),
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
                     ui.painter().add(egui::Shape::mesh(mesh));
                 } else {
-                    let load_rect = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, 18.0), egui::vec2(34.0, 34.0));
-                    draw_icon(ui.painter(), IconKind::Loader, load_rect, egui::Color32::from_gray(190), 2.0);
+                    let load_rect = egui::Rect::from_center_size(
+                        rect.center() - egui::vec2(0.0, 18.0),
+                        egui::vec2(34.0, 34.0),
+                    );
+                    draw_icon(
+                        ui.painter(),
+                        IconKind::Loader,
+                        load_rect,
+                        egui::Color32::from_gray(190),
+                        2.0,
+                    );
                     ui.painter().text(
                         rect.center() + egui::vec2(0.0, 24.0),
                         egui::Align2::CENTER_CENTER,
-                        format!("Loading {}...", pv_path.file_name().unwrap_or_default().to_string_lossy()),
+                        format!(
+                            "Loading {}...",
+                            pv_path.file_name().unwrap_or_default().to_string_lossy()
+                        ),
                         egui::FontId::proportional(13.0),
                         egui::Color32::from_gray(155),
                     );
                 }
 
-                let fname = pv_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
+                let fname = pv_path.file_name().unwrap_or_default().to_string_lossy();
                 let meta = if let Some(orig) = self.full_mgr.get_original_size(&pv_path) {
                     format!("{} x {}", orig[0], orig[1])
                 } else {
@@ -1527,10 +1729,17 @@ impl LuxePixApp {
                     egui::pos2(rect.left(), rect.bottom() - 52.0),
                     rect.right_bottom(),
                 );
-                ui.painter().rect_filled(info_rect, 0.0, egui::Color32::from_rgba_premultiplied(20, 24, 28, 235));
+                ui.painter().rect_filled(
+                    info_rect,
+                    0.0,
+                    egui::Color32::from_rgba_premultiplied(20, 24, 28, 235),
+                );
                 ui.painter().line_segment(
                     [info_rect.left_top(), info_rect.right_top()],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 22)),
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 22),
+                    ),
                 );
                 ui.painter().text(
                     info_rect.left_center() + egui::vec2(24.0, 0.0),
@@ -1546,10 +1755,30 @@ impl LuxePixApp {
                     egui::FontId::proportional(13.0),
                     egui::Color32::from_gray(165),
                 );
-                let zoom_badge = egui::Rect::from_center_size(info_rect.right_center() - egui::vec2(130.0, 0.0), egui::vec2(82.0, 28.0));
-                ui.painter().rect_filled(zoom_badge, 6.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 16));
-                ui.painter().rect_stroke(zoom_badge, 6.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 26)));
-                ui.painter().text(zoom_badge.center(), egui::Align2::CENTER_CENTER, format!("{:.0}%", current_zoom * 100.0), egui::FontId::proportional(12.0), egui::Color32::from_gray(210));
+                let zoom_badge = egui::Rect::from_center_size(
+                    info_rect.right_center() - egui::vec2(130.0, 0.0),
+                    egui::vec2(82.0, 28.0),
+                );
+                ui.painter().rect_filled(
+                    zoom_badge,
+                    6.0,
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 16),
+                );
+                ui.painter().rect_stroke(
+                    zoom_badge,
+                    6.0,
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 26),
+                    ),
+                );
+                ui.painter().text(
+                    zoom_badge.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{:.0}%", current_zoom * 100.0),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_gray(210),
+                );
                 ui.painter().text(
                     info_rect.right_center() - egui::vec2(24.0, 0.0),
                     egui::Align2::RIGHT_CENTER,
@@ -1562,9 +1791,14 @@ impl LuxePixApp {
                     egui::pos2(rect.max.x - 54.0, rect.min.y + 18.0),
                     egui::vec2(36.0, 36.0),
                 );
-                let close_resp =
-                    ui.allocate_rect(close_rect, egui::Sense::click());
-                paint_lightbox_button(ui, close_rect, close_resp.hovered(), IconKind::Close, egui::Color32::from_gray(220));
+                let close_resp = ui.allocate_rect(close_rect, egui::Sense::click());
+                paint_lightbox_button(
+                    ui,
+                    close_rect,
+                    close_resp.hovered(),
+                    IconKind::Close,
+                    egui::Color32::from_gray(220),
+                );
                 if close_resp.clicked() {
                     action_close = true;
                 }
@@ -1574,26 +1808,40 @@ impl LuxePixApp {
                     egui::pos2(rect.min.x + 52.0, nav_y),
                     egui::vec2(56.0, 56.0),
                 );
-                let prev_resp =
-                    ui.allocate_rect(prev_rect, egui::Sense::click());
-                paint_lightbox_button(ui, prev_rect, prev_resp.hovered(), IconKind::ChevronLeft, if pv_index > 0 { egui::Color32::from_gray(220) } else { egui::Color32::from_gray(80) });
-                if pv_index > 0 {
-                    if prev_resp.clicked() {
-                        action_nav_btn = Some(-1);
-                    }
+                let prev_resp = ui.allocate_rect(prev_rect, egui::Sense::click());
+                paint_lightbox_button(
+                    ui,
+                    prev_rect,
+                    prev_resp.hovered(),
+                    IconKind::ChevronLeft,
+                    if pv_index > 0 {
+                        egui::Color32::from_gray(220)
+                    } else {
+                        egui::Color32::from_gray(80)
+                    },
+                );
+                if pv_index > 0 && prev_resp.clicked() {
+                    action_nav_btn = Some(-1);
                 }
 
                 let next_rect = egui::Rect::from_center_size(
                     egui::pos2(rect.max.x - 52.0, nav_y),
                     egui::vec2(56.0, 56.0),
                 );
-                let next_resp =
-                    ui.allocate_rect(next_rect, egui::Sense::click());
-                paint_lightbox_button(ui, next_rect, next_resp.hovered(), IconKind::ChevronRight, if pv_index + 1 < num_images { egui::Color32::from_gray(220) } else { egui::Color32::from_gray(80) });
-                if pv_index + 1 < num_images {
-                    if next_resp.clicked() {
-                        action_nav_btn = Some(1);
-                    }
+                let next_resp = ui.allocate_rect(next_rect, egui::Sense::click());
+                paint_lightbox_button(
+                    ui,
+                    next_rect,
+                    next_resp.hovered(),
+                    IconKind::ChevronRight,
+                    if pv_index + 1 < num_images {
+                        egui::Color32::from_gray(220)
+                    } else {
+                        egui::Color32::from_gray(80)
+                    },
+                );
+                if pv_index + 1 < num_images && next_resp.clicked() {
+                    action_nav_btn = Some(1);
                 }
             });
 
@@ -1725,7 +1973,11 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> egui::Color32 {
 
 fn apply_theme(ctx: &egui::Context, theme: &str) {
     let palette = Palette::for_theme(theme);
-    let mut visuals = if theme == "dark" { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let mut visuals = if theme == "dark" {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
     visuals.panel_fill = palette.surface;
     visuals.window_fill = palette.surface;
     visuals.extreme_bg_color = palette.surface_inset;
@@ -1749,7 +2001,11 @@ fn apply_theme(ctx: &egui::Context, theme: &str) {
 
 fn status_color(status: &str, palette: &Palette) -> egui::Color32 {
     let lower = status.to_lowercase();
-    if lower.contains("fail") || lower.contains("not found") || lower.contains("error") || lower.contains("invalid") {
+    if lower.contains("fail")
+        || lower.contains("not found")
+        || lower.contains("error")
+        || lower.contains("invalid")
+    {
         palette.error
     } else if lower.contains("renamed") || lower.contains("switched") {
         palette.success
@@ -1768,8 +2024,14 @@ fn icon_button(
     active: bool,
     palette: &Palette,
 ) -> egui::Response {
-    let label_w = label.map(|text| text.chars().count() as f32 * 7.0 + 12.0).unwrap_or(0.0);
-    let width = if label.is_some() { 34.0 + label_w } else { 34.0 };
+    let label_w = label
+        .map(|text| text.chars().count() as f32 * 7.0 + 12.0)
+        .unwrap_or(0.0);
+    let width = if label.is_some() {
+        34.0 + label_w
+    } else {
+        34.0
+    };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
     let fill = if active {
         palette.accent_soft
@@ -1780,11 +2042,21 @@ fn icon_button(
     };
     ui.painter().rect_filled(rect, 6.0, fill);
     if active {
-        ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(1.0, palette.border_soft));
+        ui.painter()
+            .rect_stroke(rect, 6.0, egui::Stroke::new(1.0, palette.border_soft));
     }
-    let color = if active { palette.accent } else if response.hovered() { palette.text_primary } else { palette.text_secondary };
+    let color = if active {
+        palette.accent
+    } else if response.hovered() {
+        palette.text_primary
+    } else {
+        palette.text_secondary
+    };
     let icon_rect = if label.is_some() {
-        egui::Rect::from_center_size(egui::pos2(rect.left() + 17.0, rect.center().y), egui::vec2(16.0, 16.0))
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 17.0, rect.center().y),
+            egui::vec2(16.0, 16.0),
+        )
     } else {
         egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0))
     };
@@ -1801,12 +2073,24 @@ fn icon_button(
     response.on_hover_text(tooltip)
 }
 
-fn primary_button(ui: &mut egui::Ui, icon: IconKind, label: &str, palette: &Palette) -> egui::Response {
+fn primary_button(
+    ui: &mut egui::Ui,
+    icon: IconKind,
+    label: &str,
+    palette: &Palette,
+) -> egui::Response {
     let width = 44.0 + label.chars().count() as f32 * 7.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
-    let fill = if response.hovered() { palette.accent_hover } else { palette.accent };
+    let fill = if response.hovered() {
+        palette.accent_hover
+    } else {
+        palette.accent
+    };
     ui.painter().rect_filled(rect, 6.0, fill);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 17.0, rect.center().y), egui::vec2(15.0, 15.0));
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 17.0, rect.center().y),
+        egui::vec2(15.0, 15.0),
+    );
     draw_icon(ui.painter(), icon, icon_rect, egui::Color32::WHITE, 1.6);
     ui.painter().text(
         egui::pos2(rect.left() + 32.0, rect.center().y),
@@ -1826,10 +2110,15 @@ fn render_pane_header(
     thumb_size: &mut f32,
     range: std::ops::RangeInclusive<f32>,
 ) {
-    let rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), egui::Sense::hover()).0;
+    let rect = ui
+        .allocate_exact_size(egui::vec2(ui.available_width(), 64.0), egui::Sense::hover())
+        .0;
     ui.painter().rect_filled(rect, 0.0, palette.surface);
     ui.painter().line_segment(
-        [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
+        [
+            egui::pos2(rect.left(), rect.bottom()),
+            egui::pos2(rect.right(), rect.bottom()),
+        ],
         egui::Stroke::new(1.0, palette.border_soft),
     );
     ui.painter().text(
@@ -1848,21 +2137,47 @@ fn render_pane_header(
     );
 
     let slider_rect = egui::Rect::from_min_size(
-        egui::pos2((rect.right() - 170.0).max(rect.left() + 160.0), rect.center().y - 12.0),
+        egui::pos2(
+            (rect.right() - 170.0).max(rect.left() + 160.0),
+            rect.center().y - 12.0,
+        ),
         egui::vec2(150.0, 24.0),
     );
     if slider_rect.right() <= rect.right() - 12.0 {
-        let small = egui::Rect::from_center_size(slider_rect.left_center() + egui::vec2(8.0, 0.0), egui::vec2(12.0, 12.0));
-        let large = egui::Rect::from_center_size(slider_rect.right_center() - egui::vec2(8.0, 0.0), egui::vec2(16.0, 16.0));
-        draw_icon(ui.painter(), IconKind::Image, small, palette.text_tertiary, 1.4);
-        draw_icon(ui.painter(), IconKind::Image, large, palette.text_tertiary, 1.4);
+        let small = egui::Rect::from_center_size(
+            slider_rect.left_center() + egui::vec2(8.0, 0.0),
+            egui::vec2(12.0, 12.0),
+        );
+        let large = egui::Rect::from_center_size(
+            slider_rect.right_center() - egui::vec2(8.0, 0.0),
+            egui::vec2(16.0, 16.0),
+        );
+        draw_icon(
+            ui.painter(),
+            IconKind::Image,
+            small,
+            palette.text_tertiary,
+            1.4,
+        );
+        draw_icon(
+            ui.painter(),
+            IconKind::Image,
+            large,
+            palette.text_tertiary,
+            1.4,
+        );
         let control_rect = slider_rect.shrink2(egui::vec2(24.0, 0.0));
-        ui.put(control_rect, egui::Slider::new(thumb_size, range).show_value(false));
+        ui.put(
+            control_rect,
+            egui::Slider::new(thumb_size, range).show_value(false),
+        );
     }
 }
 
 fn render_section_label(ui: &mut egui::Ui, palette: &Palette, label: &str, count: usize) {
-    let rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover()).0;
+    let rect = ui
+        .allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover())
+        .0;
     ui.painter().text(
         rect.left_center() + egui::vec2(24.0, 0.0),
         egui::Align2::LEFT_CENTER,
@@ -1871,31 +2186,78 @@ fn render_section_label(ui: &mut egui::Ui, palette: &Palette, label: &str, count
         palette.text_tertiary,
     );
     ui.painter().line_segment(
-        [egui::pos2(rect.left() + 130.0, rect.center().y), egui::pos2(rect.right() - 24.0, rect.center().y)],
+        [
+            egui::pos2(rect.left() + 130.0, rect.center().y),
+            egui::pos2(rect.right() - 24.0, rect.center().y),
+        ],
         egui::Stroke::new(1.0, palette.border_soft),
     );
 }
 
-fn render_small_empty(ui: &mut egui::Ui, palette: &Palette, icon: IconKind, title: &str, subtitle: &str) {
+fn render_small_empty(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    icon: IconKind,
+    title: &str,
+    subtitle: &str,
+) {
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
-            let art = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover()).0;
+            let art = ui
+                .allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover())
+                .0;
             ui.painter().rect_filled(art, 14.0, palette.surface_inset);
-            ui.painter().rect_stroke(art, 14.0, egui::Stroke::new(1.0, palette.border_soft));
-            draw_icon(ui.painter(), icon, art.shrink(22.0), palette.text_tertiary, 1.7);
+            ui.painter()
+                .rect_stroke(art, 14.0, egui::Stroke::new(1.0, palette.border_soft));
+            draw_icon(
+                ui.painter(),
+                icon,
+                art.shrink(22.0),
+                palette.text_tertiary,
+                1.7,
+            );
             ui.add_space(14.0);
-            ui.label(egui::RichText::new(title).size(14.0).strong().color(palette.text_primary));
+            ui.label(
+                egui::RichText::new(title)
+                    .size(14.0)
+                    .strong()
+                    .color(palette.text_primary),
+            );
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(subtitle).size(12.5).color(palette.text_secondary));
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .size(12.5)
+                    .color(palette.text_secondary),
+            );
         });
     });
 }
 
-fn paint_tile_shell(ui: &egui::Ui, rect: egui::Rect, selected: bool, hovered: bool, palette: &Palette) {
-    let fill = if selected { palette.accent_soft } else { palette.tile_bg };
-    let stroke_color = if selected { palette.accent } else if hovered { palette.border_standard } else { palette.border_soft };
+fn paint_tile_shell(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    selected: bool,
+    hovered: bool,
+    palette: &Palette,
+) {
+    let fill = if selected {
+        palette.accent_soft
+    } else {
+        palette.tile_bg
+    };
+    let stroke_color = if selected {
+        palette.accent
+    } else if hovered {
+        palette.border_standard
+    } else {
+        palette.border_soft
+    };
     ui.painter().rect_filled(rect, 8.0, fill);
-    ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(if selected { 1.5 } else { 1.0 }, stroke_color));
+    ui.painter().rect_stroke(
+        rect,
+        8.0,
+        egui::Stroke::new(if selected { 1.5 } else { 1.0 }, stroke_color),
+    );
 }
 
 fn paint_thumbnail(ui: &egui::Ui, tex: &egui::TextureHandle, rect: egui::Rect, palette: &Palette) {
@@ -1915,9 +2277,18 @@ fn paint_thumbnail(ui: &egui::Ui, tex: &egui::TextureHandle, rect: egui::Rect, p
     ui.painter().add(egui::Shape::mesh(mesh));
 }
 
-fn paint_placeholder(ui: &egui::Ui, rect: egui::Rect, icon: IconKind, label: &str, palette: &Palette) {
+fn paint_placeholder(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    icon: IconKind,
+    label: &str,
+    palette: &Palette,
+) {
     ui.painter().rect_filled(rect, 7.0, palette.thumb_bg);
-    let icon_rect = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, if label.is_empty() { 0.0 } else { 8.0 }), egui::vec2(28.0, 28.0));
+    let icon_rect = egui::Rect::from_center_size(
+        rect.center() - egui::vec2(0.0, if label.is_empty() { 0.0 } else { 8.0 }),
+        egui::vec2(28.0, 28.0),
+    );
     draw_icon(ui.painter(), icon, icon_rect, palette.text_tertiary, 1.7);
     if !label.is_empty() {
         ui.painter().text(
@@ -1938,19 +2309,70 @@ fn paint_file_placeholder(ui: &egui::Ui, rect: egui::Rect, file: &FileEntry, pal
         "pdf" | "doc" | "docx" | "rtf" | "odt" | "txt" | "log" | "md" => IconKind::Doc,
         _ => IconKind::File,
     };
-    draw_icon(ui.painter(), icon, egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, 14.0), egui::vec2(32.0, 32.0)), palette.text_tertiary, 1.7);
-    let ext = if file.extension.is_empty() { "FILE".into() } else { file.extension.to_uppercase() };
-    let badge = egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 24.0), egui::vec2((ext.len() as f32 * 7.0 + 18.0).max(44.0), 22.0));
+    draw_icon(
+        ui.painter(),
+        icon,
+        egui::Rect::from_center_size(
+            rect.center() - egui::vec2(0.0, 14.0),
+            egui::vec2(32.0, 32.0),
+        ),
+        palette.text_tertiary,
+        1.7,
+    );
+    let ext = if file.extension.is_empty() {
+        "FILE".into()
+    } else {
+        file.extension.to_uppercase()
+    };
+    let badge = egui::Rect::from_center_size(
+        rect.center() + egui::vec2(0.0, 24.0),
+        egui::vec2((ext.len() as f32 * 7.0 + 18.0).max(44.0), 22.0),
+    );
     ui.painter().rect_filled(badge, 4.0, palette.surface);
-    ui.painter().rect_stroke(badge, 4.0, egui::Stroke::new(1.0, palette.border_soft));
-    ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, ext, egui::FontId::proportional(11.0), palette.text_secondary);
+    ui.painter()
+        .rect_stroke(badge, 4.0, egui::Stroke::new(1.0, palette.border_soft));
+    ui.painter().text(
+        badge.center(),
+        egui::Align2::CENTER_CENTER,
+        ext,
+        egui::FontId::proportional(11.0),
+        palette.text_secondary,
+    );
 }
 
-fn paint_count_pill(ui: &egui::Ui, rect: egui::Rect, count: usize, palette: &Palette, selected: bool) {
-    let fill = if selected { rgba(palette.accent.r(), palette.accent.g(), palette.accent.b(), 35) } else { palette.surface_inset };
-    let color = if selected { palette.accent } else { palette.text_secondary };
+fn paint_count_pill(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    count: usize,
+    palette: &Palette,
+    selected: bool,
+) {
+    let fill = if selected {
+        rgba(
+            palette.accent.r(),
+            palette.accent.g(),
+            palette.accent.b(),
+            35,
+        )
+    } else {
+        palette.surface_inset
+    };
+    let color = if selected {
+        palette.accent
+    } else {
+        palette.text_secondary
+    };
     ui.painter().rect_filled(rect, 4.0, fill);
-    draw_icon(ui.painter(), IconKind::Image, egui::Rect::from_center_size(rect.left_center() + egui::vec2(10.0, 0.0), egui::vec2(10.0, 10.0)), color, 1.3);
+    draw_icon(
+        ui.painter(),
+        IconKind::Image,
+        egui::Rect::from_center_size(
+            rect.left_center() + egui::vec2(10.0, 0.0),
+            egui::vec2(10.0, 10.0),
+        ),
+        color,
+        1.3,
+    );
     ui.painter().text(
         egui::pos2(rect.left() + 20.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -1976,15 +2398,33 @@ fn paint_lightbox_button(
     ui.painter().rect_stroke(
         rect,
         rect.width() * 0.5,
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 26)),
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 26),
+        ),
     );
-    draw_icon(ui.painter(), icon, rect.shrink(rect.width() * 0.32), color, 1.8);
+    draw_icon(
+        ui.painter(),
+        icon,
+        rect.shrink(rect.width() * 0.32),
+        color,
+        1.8,
+    );
 }
 
-fn draw_icon(painter: &egui::Painter, icon: IconKind, rect: egui::Rect, color: egui::Color32, width: f32) {
+fn draw_icon(
+    painter: &egui::Painter,
+    icon: IconKind,
+    rect: egui::Rect,
+    color: egui::Color32,
+    width: f32,
+) {
     let stroke = egui::Stroke::new(width, color);
     let p = |x: f32, y: f32| -> egui::Pos2 {
-        egui::pos2(rect.left() + rect.width() * x / 24.0, rect.top() + rect.height() * y / 24.0)
+        egui::pos2(
+            rect.left() + rect.width() * x / 24.0,
+            rect.top() + rect.height() * y / 24.0,
+        )
     };
     let r = |x1: f32, y1: f32, x2: f32, y2: f32| -> egui::Rect {
         egui::Rect::from_min_max(p(x1, y1), p(x2, y2))
@@ -1992,25 +2432,73 @@ fn draw_icon(painter: &egui::Painter, icon: IconKind, rect: egui::Rect, color: e
 
     match icon {
         IconKind::Folder => {
-            painter.add(egui::Shape::line(vec![p(3.0, 8.0), p(3.0, 19.0), p(21.0, 19.0), p(21.0, 9.0), p(11.0, 9.0), p(9.0, 6.0), p(5.0, 6.0), p(3.0, 8.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(3.0, 8.0),
+                    p(3.0, 19.0),
+                    p(21.0, 19.0),
+                    p(21.0, 9.0),
+                    p(11.0, 9.0),
+                    p(9.0, 6.0),
+                    p(5.0, 6.0),
+                    p(3.0, 8.0),
+                ],
+                stroke,
+            ));
         }
         IconKind::FolderOpen => {
-            painter.add(egui::Shape::line(vec![p(3.0, 8.0), p(3.0, 18.0), p(19.0, 18.0), p(21.0, 10.0), p(3.0, 10.0)], stroke));
-            painter.add(egui::Shape::line(vec![p(3.0, 8.0), p(5.0, 6.0), p(9.0, 6.0), p(11.0, 8.5), p(19.0, 8.5)], stroke));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(3.0, 8.0),
+                    p(3.0, 18.0),
+                    p(19.0, 18.0),
+                    p(21.0, 10.0),
+                    p(3.0, 10.0),
+                ],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(3.0, 8.0),
+                    p(5.0, 6.0),
+                    p(9.0, 6.0),
+                    p(11.0, 8.5),
+                    p(19.0, 8.5),
+                ],
+                stroke,
+            ));
         }
         IconKind::Image => {
             painter.rect_stroke(r(3.5, 4.5, 20.5, 19.5), 2.0, stroke);
             painter.circle_stroke(p(9.0, 10.0), rect.width() * 1.5 / 24.0, stroke);
-            painter.add(egui::Shape::line(vec![p(4.5, 17.0), p(9.0, 12.5), p(13.5, 17.0), p(17.0, 13.0), p(20.0, 16.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(4.5, 17.0),
+                    p(9.0, 12.5),
+                    p(13.5, 17.0),
+                    p(17.0, 13.0),
+                    p(20.0, 16.0),
+                ],
+                stroke,
+            ));
         }
         IconKind::Refresh => {
-            painter.add(egui::Shape::line(vec![p(4.0, 5.0), p(4.0, 10.0), p(9.0, 10.0)], stroke));
-            painter.add(egui::Shape::line(vec![p(20.0, 19.0), p(20.0, 14.0), p(15.0, 14.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![p(4.0, 5.0), p(4.0, 10.0), p(9.0, 10.0)],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![p(20.0, 19.0), p(20.0, 14.0), p(15.0, 14.0)],
+                stroke,
+            ));
             painter.circle_stroke(p(12.0, 12.0), rect.width() * 7.0 / 24.0, stroke);
         }
         IconKind::History => {
             painter.circle_stroke(p(12.0, 12.0), rect.width() * 8.0 / 24.0, stroke);
-            painter.add(egui::Shape::line(vec![p(4.0, 4.0), p(4.0, 9.0), p(9.0, 9.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![p(4.0, 4.0), p(4.0, 9.0), p(9.0, 9.0)],
+                stroke,
+            ));
             painter.line_segment([p(12.0, 7.0), p(12.0, 12.0)], stroke);
             painter.line_segment([p(12.0, 12.0), p(15.0, 14.0)], stroke);
         }
@@ -2029,8 +2517,20 @@ fn draw_icon(painter: &egui::Painter, icon: IconKind, rect: egui::Rect, color: e
         IconKind::Sun => {
             painter.circle_stroke(p(12.0, 12.0), rect.width() * 4.0 / 24.0, stroke);
             for (a, b) in [(12.0, 3.0), (12.0, 21.0), (3.0, 12.0), (21.0, 12.0)] {
-                let dx = if a == 12.0 { 0.0 } else if a < 12.0 { 2.0 } else { -2.0 };
-                let dy = if b == 12.0 { 0.0 } else if b < 12.0 { 2.0 } else { -2.0 };
+                let dx = if a == 12.0 {
+                    0.0
+                } else if a < 12.0 {
+                    2.0
+                } else {
+                    -2.0
+                };
+                let dy = if b == 12.0 {
+                    0.0
+                } else if b < 12.0 {
+                    2.0
+                } else {
+                    -2.0
+                };
                 painter.line_segment([p(a, b), p(a + dx, b + dy)], stroke);
             }
             painter.line_segment([p(5.5, 5.5), p(7.0, 7.0)], stroke);
@@ -2039,30 +2539,76 @@ fn draw_icon(painter: &egui::Painter, icon: IconKind, rect: egui::Rect, color: e
             painter.line_segment([p(17.0, 7.0), p(18.5, 5.5)], stroke);
         }
         IconKind::Moon => {
-            painter.add(egui::Shape::convex_polygon(vec![p(17.0, 4.5), p(14.0, 7.5), p(13.5, 12.0), p(16.0, 16.5), p(20.0, 18.0), p(16.0, 20.0), p(10.0, 19.0), p(5.0, 14.0), p(4.5, 8.0), p(8.0, 4.5), p(12.0, 3.5)], egui::Color32::TRANSPARENT, stroke));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    p(17.0, 4.5),
+                    p(14.0, 7.5),
+                    p(13.5, 12.0),
+                    p(16.0, 16.5),
+                    p(20.0, 18.0),
+                    p(16.0, 20.0),
+                    p(10.0, 19.0),
+                    p(5.0, 14.0),
+                    p(4.5, 8.0),
+                    p(8.0, 4.5),
+                    p(12.0, 3.5),
+                ],
+                egui::Color32::TRANSPARENT,
+                stroke,
+            ));
         }
         IconKind::Close => {
             painter.line_segment([p(6.0, 6.0), p(18.0, 18.0)], stroke);
             painter.line_segment([p(18.0, 6.0), p(6.0, 18.0)], stroke);
         }
         IconKind::ChevronLeft => {
-            painter.add(egui::Shape::line(vec![p(15.0, 6.0), p(9.0, 12.0), p(15.0, 18.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![p(15.0, 6.0), p(9.0, 12.0), p(15.0, 18.0)],
+                stroke,
+            ));
         }
         IconKind::ChevronRight => {
-            painter.add(egui::Shape::line(vec![p(9.0, 6.0), p(15.0, 12.0), p(9.0, 18.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![p(9.0, 6.0), p(15.0, 12.0), p(9.0, 18.0)],
+                stroke,
+            ));
         }
         IconKind::HardDrive => {
             painter.rect_stroke(r(3.0, 13.0, 21.0, 19.0), 2.0, stroke);
-            painter.add(egui::Shape::line(vec![p(6.0, 13.0), p(8.0, 6.0), p(16.0, 6.0), p(18.0, 13.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![p(6.0, 13.0), p(8.0, 6.0), p(16.0, 6.0), p(18.0, 13.0)],
+                stroke,
+            ));
             painter.circle_filled(p(7.5, 16.0), rect.width() * 0.8 / 24.0, color);
         }
         IconKind::Loader => {
-            painter.circle_stroke(p(12.0, 12.0), rect.width() * 7.0 / 24.0, egui::Stroke::new(width, rgba(color.r(), color.g(), color.b(), 80)));
-            painter.add(egui::Shape::line(vec![p(12.0, 5.0), p(16.5, 7.0), p(19.0, 11.0)], stroke));
+            painter.circle_stroke(
+                p(12.0, 12.0),
+                rect.width() * 7.0 / 24.0,
+                egui::Stroke::new(width, rgba(color.r(), color.g(), color.b(), 80)),
+            );
+            painter.add(egui::Shape::line(
+                vec![p(12.0, 5.0), p(16.5, 7.0), p(19.0, 11.0)],
+                stroke,
+            ));
         }
         IconKind::Doc | IconKind::File => {
-            painter.add(egui::Shape::line(vec![p(7.0, 3.0), p(14.0, 3.0), p(19.0, 8.0), p(19.0, 21.0), p(5.0, 21.0), p(5.0, 5.0), p(7.0, 3.0)], stroke));
-            painter.add(egui::Shape::line(vec![p(14.0, 3.0), p(14.0, 8.0), p(19.0, 8.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(7.0, 3.0),
+                    p(14.0, 3.0),
+                    p(19.0, 8.0),
+                    p(19.0, 21.0),
+                    p(5.0, 21.0),
+                    p(5.0, 5.0),
+                    p(7.0, 3.0),
+                ],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![p(14.0, 3.0), p(14.0, 8.0), p(19.0, 8.0)],
+                stroke,
+            ));
             if matches!(icon, IconKind::Doc) {
                 painter.line_segment([p(8.0, 13.0), p(16.0, 13.0)], stroke);
                 painter.line_segment([p(8.0, 17.0), p(14.0, 17.0)], stroke);
@@ -2070,7 +2616,10 @@ fn draw_icon(painter: &egui::Painter, icon: IconKind, rect: egui::Rect, color: e
         }
         IconKind::Video => {
             painter.rect_stroke(r(3.0, 6.0, 16.0, 18.0), 2.0, stroke);
-            painter.add(egui::Shape::line(vec![p(16.0, 10.0), p(21.0, 7.0), p(21.0, 17.0), p(16.0, 14.0)], stroke));
+            painter.add(egui::Shape::line(
+                vec![p(16.0, 10.0), p(21.0, 7.0), p(21.0, 17.0), p(16.0, 14.0)],
+                stroke,
+            ));
         }
         IconKind::Archive => {
             painter.rect_stroke(r(3.0, 4.0, 21.0, 8.0), 1.0, stroke);
@@ -2098,7 +2647,14 @@ fn elide_middle(s: &str, max: usize) -> String {
     }
     let keep = (max - 3) / 2;
     let start: String = s.chars().take(keep).collect();
-    let end: String = s.chars().rev().take(max - 3 - keep).collect::<String>().chars().rev().collect();
+    let end: String = s
+        .chars()
+        .rev()
+        .take(max - 3 - keep)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     format!("{}...{}", start, end)
 }
 
@@ -2107,12 +2663,14 @@ fn shortcut_row(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
     ui.horizontal(|ui| {
         ui.set_height(30.0);
         ui.add_sized([112.0, 22.0], egui::Label::new(label));
-        changed = ui.add_sized(
-            [180.0, 24.0],
-            egui::TextEdit::singleline(value)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(180.0),
-        ).changed();
+        changed = ui
+            .add_sized(
+                [180.0, 24.0],
+                egui::TextEdit::singleline(value)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(180.0),
+            )
+            .changed();
     });
     changed
 }
@@ -2205,10 +2763,7 @@ fn unique_destination(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("item");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("item");
     let ext = path.extension().and_then(|e| e.to_str());
     for i in 1..10_000 {
         let suffix = if i == 1 {
@@ -2277,7 +2832,10 @@ fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
             cleanup.map_err(|cleanup_err| {
                 io::Error::new(
                     cleanup_err.kind(),
-                    format!("moved by copy but cleanup failed after rename error '{}': {}", rename_err, cleanup_err),
+                    format!(
+                        "moved by copy but cleanup failed after rename error '{}': {}",
+                        rename_err, cleanup_err
+                    ),
                 )
             })
         }
