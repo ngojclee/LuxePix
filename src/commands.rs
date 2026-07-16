@@ -64,7 +64,7 @@ impl CommandId {
         Self::EditAddress,
     ];
 
-    pub const ACTIVE: [Self; 17] = [
+    pub const ACTIVE: [Self; 19] = [
         Self::Settings,
         Self::EditAddress,
         Self::Back,
@@ -73,6 +73,7 @@ impl CommandId {
         Self::Copy,
         Self::Cut,
         Self::Paste,
+        Self::NewFolder,
         Self::Rename,
         Self::Delete,
         Self::DeletePermanent,
@@ -80,6 +81,7 @@ impl CommandId {
         Self::OpenWith,
         Self::RevealInExplorer,
         Self::SelectAll,
+        Self::Undo,
         Self::Refresh,
         Self::Preview,
     ];

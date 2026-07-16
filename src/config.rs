@@ -9,7 +9,7 @@ use crate::commands::CommandId;
 use crate::model::{SortDirection, SortField, ViewMode};
 use crate::storage::{transactional_write, StoragePaths};
 
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 const MAX_HISTORY: usize = 50;
 const SHORTCUT_PROFILE_VERSION: u32 = 1;
 
@@ -28,6 +28,7 @@ pub struct AppConfig {
     pub show_hidden_files: bool,
     pub show_selection_checkboxes: bool,
     pub confirm_permanent_delete: bool,
+    pub confirm_recycle_delete: bool,
     pub check_updates_on_startup: bool,
     pub indexing_enabled: bool,
     pub similarity_result_count: usize,
@@ -227,6 +228,7 @@ impl Default for AppConfig {
             show_hidden_files: false,
             show_selection_checkboxes: false,
             confirm_permanent_delete: true,
+            confirm_recycle_delete: false,
             check_updates_on_startup: true,
             indexing_enabled: true,
             similarity_result_count: 10,
@@ -375,6 +377,7 @@ impl AppConfig {
             self.theme = "system".into();
         }
         self.similarity_result_count = self.similarity_result_count.clamp(5, 50);
+        self.confirm_permanent_delete = true;
         self.path_history.truncate(MAX_HISTORY);
         for source in &mut self.sources {
             source.path = source.path.trim().to_string();
@@ -601,7 +604,7 @@ mod tests {
 
         let loaded = AppConfig::load(&paths);
 
-        assert_eq!(loaded.schema_version, 4);
+        assert_eq!(loaded.schema_version, 5);
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.similarity_result_count, 50);
         assert_eq!(loaded.sources.len(), 1);

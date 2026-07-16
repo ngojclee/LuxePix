@@ -3,14 +3,18 @@
 mod app;
 mod commands;
 mod config;
+mod file_ops;
 mod model;
 mod navigation;
+mod operations;
 mod scanner;
 mod selection;
 mod sorting;
 mod storage;
 mod tasks;
 mod thumbs;
+mod undo;
+mod windows_shell;
 
 use eframe::egui;
 

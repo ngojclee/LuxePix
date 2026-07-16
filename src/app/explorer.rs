@@ -120,7 +120,7 @@ impl LuxePixApp {
                         let tile_height = tile_width + 44.0;
                         let (rect, response) = ui.allocate_exact_size(
                             egui::vec2(tile_width, tile_height),
-                            egui::Sense::click(),
+                            egui::Sense::click_and_drag(),
                         );
                         item_rects.push((file.id.clone(), rect));
                         if pending_scroll.as_ref() == Some(&file.id) {
@@ -166,6 +166,9 @@ impl LuxePixApp {
                             self.selected_file = Some(file.id.clone());
                             self.active_pane = ExplorerPane::Files;
                             open_selected = true;
+                        }
+                        if response.drag_started() {
+                            self.begin_file_drag(file);
                         }
                         if response.secondary_clicked() {
                             self.select_file_for_context(file.id.clone());
@@ -260,7 +263,7 @@ impl LuxePixApp {
                 for file in &files {
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 38.0),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
                     item_rects.push((file.id.clone(), rect));
                     if pending_scroll.as_ref() == Some(&file.id) {
@@ -353,6 +356,9 @@ impl LuxePixApp {
                         self.active_pane = ExplorerPane::Files;
                         open_selected = true;
                     }
+                    if response.drag_started() {
+                        self.begin_file_drag(file);
+                    }
                     if response.secondary_clicked() {
                         self.select_file_for_context(file.id.clone());
                     }
@@ -413,7 +419,7 @@ impl LuxePixApp {
                 for file in &files {
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 36.0),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     );
                     item_rects.push((file.id.clone(), rect));
                     if pending_scroll.as_ref() == Some(&file.id) {
@@ -522,6 +528,9 @@ impl LuxePixApp {
                         self.selected_file = Some(file.id.clone());
                         self.active_pane = ExplorerPane::Files;
                         open_selected = true;
+                    }
+                    if response.drag_started() {
+                        self.begin_file_drag(file);
                     }
                     if response.secondary_clicked() {
                         self.select_file_for_context(file.id.clone());

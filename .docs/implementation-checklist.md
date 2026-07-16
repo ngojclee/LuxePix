@@ -64,19 +64,19 @@ This checklist follows:
 
 ## E3 - Professional File Operations
 
-- [ ] Add New Folder.
-- [ ] Add Windows Shell copy/cut clipboard interoperability.
-- [ ] Keep an internal clipboard fallback.
-- [ ] Add Replace, Keep Both, Skip, and Apply to All collisions.
-- [ ] Add streamed copy and move workers.
-- [ ] Add Windows-style internal drag/drop with modifier indicator.
+- [x] Add New Folder.
+- [~] Add Windows Shell copy/cut clipboard interoperability.
+- [x] Keep an internal clipboard fallback.
+- [x] Add Replace, Keep Both, Skip, and Apply to All collisions.
+- [x] Add streamed copy and move workers.
+- [x] Add Windows-style internal drag/drop with modifier indicator.
 - [!] Prove and implement outbound OLE drag/drop to Windows Explorer.
-- [ ] Send normal Delete to Windows Recycle Bin.
-- [ ] Require confirmation for Shift+Delete permanent deletion.
+- [~] Send normal Delete to Windows Recycle Bin.
+- [x] Require confirmation for Shift+Delete permanent deletion.
 - [!] Prove exact Ctrl+Z restore for tracked Recycle Bin deletion.
-- [ ] Add Task Center progress, speed, ETA, pause, cancel, retry, and errors.
-- [ ] Add bounded Undo history for rename, move, paste, new folder, and delete.
-- [ ] Add risk-based confirmation settings.
+- [x] Add Task Center progress, speed, ETA, pause, cancel, retry, and errors.
+- [~] Add bounded Undo history for rename, move, paste, new folder, and delete.
+- [x] Add risk-based confirmation settings.
 
 ## E4 - Index And Product-Code Search
 
@@ -142,7 +142,7 @@ This checklist follows:
 ## Quality And Acceptance
 
 - [~] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, and versions.
-- [ ] Add temp-directory integration tests for file operations and Undo.
+- [x] Add temp-directory integration tests for file operations and Undo.
 - [ ] Add SQLite migration, rebuild, and search tests.
 - [ ] Add pHash grouping and ranking tests.
 - [ ] Add portable updater transaction and rollback tests.
@@ -192,3 +192,14 @@ This checklist follows:
   commands, and hidden-file filtering.
 - 2026-07-16: E2 verification passed with format, strict Clippy, 27 unit tests,
   a locked release build, and a four-second release startup smoke test.
+- 2026-07-16: Implemented the E3 professional-operation core with New Folder,
+  hybrid Windows/internal file clipboard handling, explicit collision
+  decisions, streamed copy/move, internal and Explorer-inbound drag/drop,
+  Recycle Bin and permanent-delete paths, bounded Undo, and a non-blocking
+  Task Center with pause, cancel, retry, progress, speed, ETA, and errors.
+- 2026-07-16: E3 automated verification passed with format, strict Clippy,
+  42 tests, temp-directory copy/Undo round trips, collision and retry tests,
+  a locked release build, and a four-second release startup smoke test.
+  Manual Explorer clipboard round-trip and Recycle Bin smoke verification
+  remain open; outbound OLE drag and exact Recycle Bin restore remain
+  feasibility spikes.

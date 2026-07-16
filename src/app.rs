@@ -1,19 +1,26 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::{fs, io};
 
 use eframe::egui;
 
 use crate::commands::{CommandContext, CommandId};
 use crate::config::{AppConfig, ShortcutConfig};
+use crate::file_ops::{self, CollisionChoice, TransferMode, TransferPreparation, TransferRequest};
 use crate::model::{FileEntry, FolderEntry, ItemId, SortDirection, SortField, ViewMode};
 use crate::navigation::NavigationHistory;
+use crate::operations::{
+    OperationId, OperationManager, OperationOutcome, OperationRecord, OperationRequest,
+    OperationState,
+};
 use crate::scanner::{format_size, ScanOptions};
 use crate::selection::SelectionModel;
 use crate::sorting::{sort_files, sort_folders};
 use crate::storage::{transactional_write, StoragePaths};
 use crate::tasks::{TaskEvent, TaskId, TaskKind, TaskManager};
 use crate::thumbs::ThumbManager;
+use crate::undo::UndoManager;
+use crate::windows_shell;
 
 mod details;
 mod explorer;
@@ -91,6 +98,8 @@ pub struct LuxePixApp {
     tasks: TaskManager,
     root_scan_task: Option<TaskId>,
     folder_scan_task: Option<TaskId>,
+    operations: OperationManager,
+    undo: UndoManager,
 
     // Rename state
     renaming: Option<RenameState>,
@@ -109,7 +118,10 @@ pub struct LuxePixApp {
     first_run_source_valid: bool,
     path_editing: bool,
     clipboard: Option<FileClipboard>,
+    pending_paste: Option<PendingPaste>,
     pending_delete: Option<PendingDelete>,
+    internal_drag: Option<InternalDrag>,
+    show_task_center: bool,
 
     status: String,
 }
@@ -119,19 +131,33 @@ struct RenameState {
     new_name: String,
 }
 
-#[derive(Clone, Copy)]
-enum ClipboardMode {
-    Copy,
-    Cut,
-}
-
+#[derive(Clone)]
 struct FileClipboard {
     paths: Vec<PathBuf>,
-    mode: ClipboardMode,
+    mode: TransferMode,
 }
 
-enum PendingDelete {
-    Paths(Vec<PathBuf>),
+struct PendingPaste {
+    preparation: TransferPreparation,
+    choices: HashMap<PathBuf, CollisionChoice>,
+    apply_to_all: bool,
+}
+
+struct InternalDrag {
+    paths: Vec<PathBuf>,
+    target_dir: Option<PathBuf>,
+    mode: TransferMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeleteMode {
+    Recycle,
+    Permanent,
+}
+
+struct PendingDelete {
+    paths: Vec<PathBuf>,
+    mode: DeleteMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,6 +244,8 @@ impl LuxePixApp {
             tasks: TaskManager::new(4),
             root_scan_task: None,
             folder_scan_task: None,
+            operations: OperationManager::new(),
+            undo: UndoManager::default(),
             renaming: None,
             storage,
             config,
@@ -232,7 +260,10 @@ impl LuxePixApp {
             first_run_source_valid,
             path_editing: false,
             clipboard: None,
+            pending_paste: None,
             pending_delete: None,
+            internal_drag: None,
+            show_task_center: false,
             status: "Ready. Pick a folder above or choose a recent path.".into(),
         };
 
@@ -651,6 +682,8 @@ impl LuxePixApp {
                 let new_path = parent.join(&new_name);
                 match std::fs::rename(&rename.original_path, &new_path) {
                     Ok(_) => {
+                        self.undo
+                            .push_rename(rename.original_path.clone(), new_path.clone());
                         self.status = format!("Renamed \"{}\" to \"{}\".", old_name, new_name);
                         let old_id = ItemId::from(rename.original_path.as_path());
                         let new_id = ItemId::from(new_path.as_path());
@@ -729,7 +762,7 @@ impl LuxePixApp {
         CommandContext {
             has_selection: selection_count > 0,
             has_single_selection,
-            has_clipboard: self.clipboard.is_some(),
+            has_clipboard: self.clipboard.is_some() || windows_shell::clipboard_has_files(),
             has_target_directory: self.active_target_dir().is_some(),
             has_current_path,
             has_items: !self.folders.is_empty() || !self.right_files.is_empty(),
@@ -737,7 +770,7 @@ impl LuxePixApp {
             can_navigate_back: self.navigation.can_back(),
             can_navigate_forward: self.navigation.can_forward(),
             can_navigate_up: self.navigation.can_up(),
-            ..CommandContext::default()
+            can_undo: self.undo.can_undo() && self.operations.active_count() == 0,
         }
     }
 
@@ -774,21 +807,33 @@ impl LuxePixApp {
                 let paths = self.selected_paths();
                 let count = paths.len();
                 self.clipboard = Some(FileClipboard {
-                    paths,
-                    mode: ClipboardMode::Copy,
+                    paths: paths.clone(),
+                    mode: TransferMode::Copy,
                 });
-                self.status = format!("Copied {} item(s) to LuxePix clipboard.", count);
+                self.status = match windows_shell::write_file_clipboard(&paths, TransferMode::Copy) {
+                    Ok(()) => format!("Copied {count} item(s) to the Windows clipboard."),
+                    Err(error) => format!(
+                        "Copied {count} item(s) to the LuxePix clipboard; Windows clipboard was unavailable: {error}"
+                    ),
+                };
             }
             CommandId::Cut => {
                 let paths = self.selected_paths();
                 let count = paths.len();
                 self.clipboard = Some(FileClipboard {
-                    paths,
-                    mode: ClipboardMode::Cut,
+                    paths: paths.clone(),
+                    mode: TransferMode::Move,
                 });
-                self.status = format!("Cut {} item(s). Paste to move.", count);
+                self.status = match windows_shell::write_file_clipboard(&paths, TransferMode::Move)
+                {
+                    Ok(()) => format!("Cut {count} item(s). Paste to move them."),
+                    Err(error) => format!(
+                        "Cut {count} item(s) in LuxePix; Windows clipboard was unavailable: {error}"
+                    ),
+                };
             }
             CommandId::Paste => self.paste_clipboard(),
+            CommandId::NewFolder => self.create_new_folder(),
             CommandId::Rename => {
                 let target = match self.active_pane {
                     ExplorerPane::Folders => self
@@ -805,9 +850,22 @@ impl LuxePixApp {
                     });
                 }
             }
-            CommandId::Delete | CommandId::DeletePermanent => {
+            CommandId::Delete => {
                 let paths = self.selected_paths();
-                self.pending_delete = Some(PendingDelete::Paths(paths));
+                if self.config.confirm_recycle_delete {
+                    self.pending_delete = Some(PendingDelete {
+                        paths,
+                        mode: DeleteMode::Recycle,
+                    });
+                } else {
+                    self.start_delete(paths, DeleteMode::Recycle);
+                }
+            }
+            CommandId::DeletePermanent => {
+                self.pending_delete = Some(PendingDelete {
+                    paths: self.selected_paths(),
+                    mode: DeleteMode::Permanent,
+                });
             }
             CommandId::Open | CommandId::Preview => self.open_selected_item(),
             CommandId::OpenWith => {
@@ -854,7 +912,8 @@ impl LuxePixApp {
                 }
                 self.status = format!("Selected {} item(s).", self.selected_paths().len());
             }
-            CommandId::NewFolder | CommandId::Undo | CommandId::Find => {
+            CommandId::Undo => self.undo_latest_operation(),
+            CommandId::Find => {
                 self.status = format!(
                     "{} is registered and will be enabled with its explorer feature.",
                     command.short_label()
@@ -904,68 +963,343 @@ impl LuxePixApp {
             self.status = format!("Paste target is not a folder: {}", target_dir.display());
             return;
         }
-        let Some(clip) = &self.clipboard else {
-            self.status = "LuxePix clipboard is empty.".into();
+
+        let shell_payload = windows_shell::read_file_clipboard();
+        let payload = match shell_payload {
+            Ok(Some(payload)) => Some(FileClipboard {
+                paths: payload.paths,
+                mode: payload.mode,
+            }),
+            Ok(None) => self.clipboard.clone(),
+            Err(error) => {
+                if self.clipboard.is_some() {
+                    self.status = format!(
+                        "Windows clipboard was unavailable; using the LuxePix fallback: {error}"
+                    );
+                    self.clipboard.clone()
+                } else {
+                    self.status = format!("Could not read the Windows clipboard: {error}");
+                    None
+                }
+            }
+        };
+        let Some(payload) = payload else {
+            self.status = "The file clipboard is empty.".into();
+            return;
+        };
+        let paths: Vec<PathBuf> = payload
+            .paths
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect();
+        if paths.is_empty() {
+            self.status = "Clipboard files are no longer available.".into();
+            return;
+        }
+
+        self.prepare_transfer(paths, target_dir, payload.mode);
+    }
+
+    fn prepare_transfer(&mut self, paths: Vec<PathBuf>, target_dir: PathBuf, mode: TransferMode) {
+        match file_ops::prepare_transfer(&paths, &target_dir, mode) {
+            Ok(preparation) if preparation.collision_count() > 0 => {
+                self.pending_paste = Some(PendingPaste {
+                    preparation,
+                    choices: HashMap::new(),
+                    apply_to_all: false,
+                });
+            }
+            Ok(preparation) => match preparation.resolve(&HashMap::new()) {
+                Ok(request) => self.start_transfer(request),
+                Err(error) => self.status = format!("Could not prepare paste: {error}"),
+            },
+            Err(error) => self.status = format!("Could not prepare paste: {error}"),
+        }
+    }
+
+    fn begin_folder_drag(&mut self, folder: &FolderEntry) {
+        if !self.folder_selection.contains(&folder.id) {
+            self.select_folder_with_modifiers(folder.id.clone(), egui::Modifiers::default());
+        }
+        let paths = self
+            .folder_selection
+            .ids()
+            .map(|id| id.as_path().to_path_buf())
+            .collect();
+        self.internal_drag = Some(InternalDrag {
+            paths,
+            target_dir: None,
+            mode: TransferMode::Move,
+        });
+    }
+
+    fn begin_file_drag(&mut self, file: &FileEntry) {
+        if !self.file_selection.contains(&file.id) {
+            self.select_file_with_modifiers(file.id.clone(), egui::Modifiers::default());
+        }
+        let paths = self
+            .file_selection
+            .ids()
+            .map(|id| id.as_path().to_path_buf())
+            .collect();
+        self.internal_drag = Some(InternalDrag {
+            paths,
+            target_dir: None,
+            mode: TransferMode::Move,
+        });
+    }
+
+    fn set_internal_drop_target(&mut self, target_dir: PathBuf, modifiers: egui::Modifiers) {
+        if let Some(drag) = &mut self.internal_drag {
+            drag.mode = default_drop_mode(&drag.paths, &target_dir, modifiers);
+            drag.target_dir = Some(target_dir);
+        }
+    }
+
+    fn internal_drop_target_is(&self, path: &Path) -> bool {
+        self.internal_drag
+            .as_ref()
+            .and_then(|drag| drag.target_dir.as_deref())
+            == Some(path)
+    }
+
+    fn finish_internal_drag(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.pointer.primary_released()) {
+            return;
+        }
+        let Some(drag) = self.internal_drag.take() else {
+            return;
+        };
+        if let Some(target_dir) = drag.target_dir {
+            self.prepare_transfer(drag.paths, target_dir, drag.mode);
+        } else {
+            self.status = "Drag cancelled because no destination folder was selected.".into();
+        }
+    }
+
+    fn handle_external_file_drop(&mut self, ctx: &egui::Context) -> usize {
+        let (hovered_count, dropped_paths, modifiers) = ctx.input(|input| {
+            (
+                input.raw.hovered_files.len(),
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect::<Vec<_>>(),
+                input.modifiers,
+            )
+        });
+        if dropped_paths.is_empty() {
+            return hovered_count;
+        }
+
+        let Some(target_dir) = self.active_target_dir() else {
+            self.status = "Choose a destination folder before dropping files.".into();
+            return 0;
+        };
+        let mode = default_drop_mode(&dropped_paths, &target_dir, modifiers);
+        self.prepare_transfer(dropped_paths, target_dir, mode);
+        0
+    }
+
+    fn render_drop_indicator(&self, ctx: &egui::Context, external_hover_count: usize) {
+        let Some(pointer) = ctx.pointer_hover_pos() else {
+            return;
+        };
+        let (mode, count, target) = if let Some(drag) = &self.internal_drag {
+            (
+                drag.mode,
+                drag.paths.len(),
+                drag.target_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            )
+        } else if external_hover_count > 0 {
+            let Some(target) = self.active_target_dir() else {
+                return;
+            };
+            (
+                TransferMode::Copy,
+                external_hover_count,
+                Some(target.display().to_string()),
+            )
+        } else {
             return;
         };
 
-        let paths = clip.paths.clone();
-        let mode = clip.mode;
-        let mut completed = 0usize;
-        let mut last_error: Option<String> = None;
+        let target_label = target
+            .map(|path| elide_middle(&path, 52))
+            .unwrap_or_else(|| "Choose a destination".into());
+        egui::Area::new(egui::Id::new("file_drop_indicator"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pointer + egui::vec2(16.0, 18.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} {count} item(s)", mode.label())).strong(),
+                    );
+                    ui.label(egui::RichText::new(target_label).size(11.5));
+                });
+            });
+    }
 
-        for src in &paths {
-            let Some(name) = src.file_name() else {
-                continue;
-            };
-            let dst = unique_destination(&target_dir.join(name));
-            let result = match mode {
-                ClipboardMode::Copy => copy_path(src, &dst),
-                ClipboardMode::Cut => move_path(src, &dst),
-            };
-            match result {
-                Ok(()) => completed += 1,
-                Err(e) => last_error = Some(format!("{}: {}", src.display(), e)),
+    fn start_transfer(&mut self, request: TransferRequest) {
+        if request.items.is_empty() {
+            self.status = "Nothing was selected for this paste.".into();
+            return;
+        }
+        let title = request.mode.label();
+        let count = request.items.len();
+        match self.operations.start(OperationRequest::Transfer(request)) {
+            Ok(_) => {
+                self.status = format!("{title} started for {count} item(s).");
+            }
+            Err(error) => {
+                self.status = error;
             }
         }
+    }
 
-        if matches!(mode, ClipboardMode::Cut) {
-            self.clipboard = None;
+    fn create_new_folder(&mut self) {
+        let Some(parent) = self.current_path.clone() else {
+            self.status = "Choose a root folder before creating a folder.".into();
+            return;
+        };
+        match file_ops::create_unique_folder(&parent) {
+            Ok(path) => {
+                let id = ItemId::from(path.as_path());
+                self.undo.push_new_folder(path.clone());
+                self.folder_selection.replace(id.clone());
+                self.selected_folder = Some(id.clone());
+                self.pending_folder_scroll_to = Some(id);
+                self.active_pane = ExplorerPane::Folders;
+                self.renaming = Some(RenameState {
+                    original_path: path.clone(),
+                    new_name: path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                });
+                self.status = "Created a new folder. Type a name and press Enter.".into();
+                self.refresh_current_view();
+            }
+            Err(error) => self.status = format!("Could not create a folder: {error}"),
         }
-        self.refresh_current_view();
-        if let Some(err) = last_error {
-            self.status = format!("Pasted {} item(s), last error: {}", completed, err);
-        } else {
-            self.status = format!(
-                "Pasted {} item(s) into {}.",
-                completed,
-                target_dir.display()
-            );
+    }
+
+    fn undo_latest_operation(&mut self) {
+        let label = self.undo.next_label().unwrap_or("Undo").to_string();
+        match self.undo.undo_latest() {
+            Ok(_) => {
+                self.status = format!("{label} completed.");
+                self.refresh_current_view();
+            }
+            Err(error) => {
+                self.status = format!("Undo could not be completed: {error}");
+            }
+        }
+    }
+
+    fn start_delete(&mut self, paths: Vec<PathBuf>, mode: DeleteMode) {
+        if paths.is_empty() {
+            self.status = "No items are selected for deletion.".into();
+            return;
+        }
+        let request = match mode {
+            DeleteMode::Recycle => OperationRequest::Recycle { paths },
+            DeleteMode::Permanent => OperationRequest::DeletePermanent { paths },
+        };
+        match self.operations.start(request) {
+            Ok(_) => {
+                self.status = match mode {
+                    DeleteMode::Recycle => "Moving selection to Recycle Bin...".into(),
+                    DeleteMode::Permanent => "Permanent deletion started.".into(),
+                };
+            }
+            Err(error) => self.status = error,
         }
     }
 
     fn confirm_delete(&mut self) {
-        let Some(PendingDelete::Paths(paths)) = self.pending_delete.take() else {
+        let Some(pending) = self.pending_delete.take() else {
             return;
         };
-        let mut deleted = 0usize;
-        let mut last_error: Option<String> = None;
-        for path in paths {
-            let result = if path.is_dir() {
-                fs::remove_dir_all(&path)
-            } else {
-                fs::remove_file(&path)
-            };
-            match result {
-                Ok(()) => deleted += 1,
-                Err(e) => last_error = Some(format!("{}: {}", path.display(), e)),
+        self.start_delete(pending.paths, pending.mode);
+    }
+
+    fn process_operation_events(&mut self) {
+        for completion in self.operations.process_events(256) {
+            match completion.result {
+                Ok(OperationOutcome::Transfer(outcome)) => {
+                    let completed = outcome.completed.len();
+                    let error_count = outcome.errors.len();
+                    let undoable = self.undo.push_transfer(&outcome);
+                    let moved = outcome
+                        .completed
+                        .first()
+                        .is_some_and(|item| item.mode == TransferMode::Move);
+                    if moved
+                        && self.clipboard.as_ref().is_some_and(|clipboard| {
+                            clipboard.mode == TransferMode::Move
+                                && clipboard.paths.iter().all(|path| !path.exists())
+                        })
+                    {
+                        self.clipboard = None;
+                    }
+                    let status = if outcome.cancelled {
+                        format!(
+                            "Operation cancelled after {completed} item(s).{}",
+                            if undoable {
+                                " Completed items can be undone."
+                            } else {
+                                ""
+                            }
+                        )
+                    } else if error_count > 0 {
+                        format!(
+                            "Operation completed {completed} item(s) with {error_count} error(s)."
+                        )
+                    } else if undoable {
+                        format!("Operation completed for {completed} item(s). Ctrl+Z is available.")
+                    } else {
+                        format!(
+                            "Operation completed for {completed} item(s). Replaced items are not automatically undoable."
+                        )
+                    };
+                    self.refresh_current_view();
+                    self.status = status;
+                }
+                Ok(OperationOutcome::Recycled(paths)) => {
+                    let status = format!(
+                        "Moved {} item(s) to Recycle Bin. Restore them from Windows Recycle Bin if needed.",
+                        paths.len()
+                    );
+                    self.refresh_current_view();
+                    self.status = status;
+                }
+                Ok(OperationOutcome::Deleted(outcome)) => {
+                    let deleted = outcome.deleted.len();
+                    let status = if outcome.cancelled {
+                        format!("Permanent deletion cancelled after {deleted} item(s).")
+                    } else if outcome.errors.is_empty() {
+                        format!("Permanently deleted {deleted} item(s).")
+                    } else {
+                        format!(
+                            "Permanently deleted {deleted} item(s) with {} error(s).",
+                            outcome.errors.len()
+                        )
+                    };
+                    self.refresh_current_view();
+                    self.status = status;
+                }
+                Err(error) => {
+                    self.refresh_current_view();
+                    self.status = format!("Operation {:?} failed: {error}", completion.id);
+                }
             }
-        }
-        self.refresh_current_view();
-        if let Some(err) = last_error {
-            self.status = format!("Deleted {} item(s), last error: {}", deleted, err);
-        } else {
-            self.status = format!("Deleted {} item(s).", deleted);
         }
     }
 
@@ -974,6 +1308,7 @@ impl LuxePixApp {
             || self.preview.is_some()
             || self.renaming.is_some()
             || self.show_settings
+            || self.pending_paste.is_some()
             || self.pending_delete.is_some()
             || !self.config.first_run_complete
         {
@@ -1068,9 +1403,13 @@ impl eframe::App for LuxePixApp {
         if resolved_theme != self.effective_theme {
             self.effective_theme = apply_theme(ctx, &self.config.theme).to_string();
         }
+        if let Some(drag) = &mut self.internal_drag {
+            drag.target_dir = None;
+        }
         let palette = Palette::for_theme(&self.effective_theme);
 
         self.process_task_events();
+        self.process_operation_events();
 
         // Process thumbnail results
         let loaded_thumbs = self.thumb_mgr.process_results(ctx);
@@ -1187,6 +1526,10 @@ impl eframe::App for LuxePixApp {
                 }
             });
 
+        let external_hover_count = self.handle_external_file_drop(ctx);
+        self.render_drop_indicator(ctx, external_hover_count);
+        self.finish_internal_drag(ctx);
+
         // ── Preview overlay ──
         if self.preview.is_some() {
             self.render_preview(ctx);
@@ -1198,6 +1541,14 @@ impl eframe::App for LuxePixApp {
 
         if self.pending_delete.is_some() {
             self.render_delete_confirmation(ctx);
+        }
+
+        if self.pending_paste.is_some() {
+            self.render_collision_dialog(ctx);
+        }
+
+        if self.show_task_center {
+            self.render_task_center(ctx);
         }
 
         self.render_first_run(ctx);
@@ -1212,7 +1563,7 @@ impl eframe::App for LuxePixApp {
         if !self.thumb_mgr.is_idle() || !self.full_mgr.is_idle() {
             ctx.request_repaint();
         }
-        if self.tasks.active_count() > 0 {
+        if self.tasks.active_count() > 0 || self.operations.active_count() > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
@@ -1660,6 +2011,19 @@ impl LuxePixApp {
                     .color(palette.text_secondary),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let active_operations = self.operations.active_count();
+                let task_label = if active_operations > 0 {
+                    format!("Tasks ({active_operations})")
+                } else {
+                    "Tasks".into()
+                };
+                if ui
+                    .selectable_label(self.show_task_center, task_label)
+                    .on_hover_text("Open Task Center")
+                    .clicked()
+                {
+                    self.show_task_center = !self.show_task_center;
+                }
                 if let Some(path) = &self.current_path {
                     ui.label(
                         egui::RichText::new(elide_middle(&path.to_string_lossy(), 64))
@@ -1836,17 +2200,36 @@ impl LuxePixApp {
                             config_changed |= hidden_files_changed;
                             config_changed |= ui
                                 .checkbox(
-                                    &mut self.config.confirm_permanent_delete,
-                                    "Confirm permanent deletion",
+                                    &mut self.config.confirm_recycle_delete,
+                                    "Confirm before moving items to Recycle Bin",
                                 )
                                 .changed();
+                            let mut permanent_confirmation = true;
+                            ui.add_enabled(
+                                false,
+                                egui::Checkbox::new(
+                                    &mut permanent_confirmation,
+                                    "Always confirm permanent deletion",
+                                ),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Replace collisions always require an explicit choice.",
+                                )
+                                .size(12.0)
+                                .color(palette.text_secondary),
+                            );
                             ui.add_space(12.0);
                             ui.label(
-                                egui::RichText::new(if self.clipboard.is_some() {
-                                    "LuxePix clipboard contains selected items."
-                                } else {
-                                    "LuxePix clipboard is empty."
-                                })
+                                egui::RichText::new(
+                                    if self.clipboard.is_some()
+                                        || windows_shell::clipboard_has_files()
+                                    {
+                                        "The file clipboard contains selected items."
+                                    } else {
+                                        "The file clipboard is empty."
+                                    },
+                                )
                                 .color(palette.text_secondary),
                             );
                         }
@@ -1994,39 +2377,73 @@ impl LuxePixApp {
     }
 
     fn render_delete_confirmation(&mut self, ctx: &egui::Context) {
-        let Some(PendingDelete::Paths(paths)) = &self.pending_delete else {
+        let Some(pending) = &self.pending_delete else {
             return;
         };
-        let count = paths.len();
-        let sample = paths
+        let count = pending.paths.len();
+        let sample = pending
+            .paths
             .first()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        let permanent = pending.mode == DeleteMode::Permanent;
+        let title = if permanent {
+            "Delete Permanently"
+        } else {
+            "Move to Recycle Bin"
+        };
+        let question = if permanent {
+            format!("Permanently delete {count} selected item(s)?")
+        } else {
+            format!("Move {count} selected item(s) to Recycle Bin?")
+        };
+        let explanation = if permanent {
+            "This cannot be undone by LuxePix or Windows Recycle Bin."
+        } else {
+            "You can restore these items later from Windows Recycle Bin."
+        };
+        let confirm_label = if permanent {
+            "Delete Permanently"
+        } else {
+            "Move to Recycle Bin"
+        };
         let mut confirm = false;
         let mut cancel = false;
+        let palette = Palette::for_theme(&self.effective_theme);
 
-        egui::Window::new("Delete")
+        egui::Window::new(title)
             .resizable(false)
             .collapsible(false)
             .default_width(420.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label(format!("Delete {} selected item(s)?", count));
+                ui.label(question);
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(elide_middle(&sample, 72))
                         .size(12.0)
-                        .color(Palette::for_theme(&self.effective_theme).text_secondary),
+                        .color(palette.text_secondary),
                 );
                 ui.add_space(10.0);
                 ui.label(
-                    egui::RichText::new("This removes files from disk.")
+                    egui::RichText::new(explanation)
                         .size(12.0)
-                        .color(Palette::for_theme(&self.effective_theme).error),
+                        .color(if permanent {
+                            palette.error
+                        } else {
+                            palette.text_secondary
+                        }),
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
+                    if ui
+                        .button(egui::RichText::new(confirm_label).color(if permanent {
+                            palette.error
+                        } else {
+                            palette.text_primary
+                        }))
+                        .clicked()
+                    {
                         confirm = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -2040,6 +2457,285 @@ impl LuxePixApp {
         } else if cancel {
             self.pending_delete = None;
         }
+    }
+
+    fn render_collision_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.pending_paste else {
+            return;
+        };
+        let collisions: Vec<_> = pending
+            .preparation
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.collision)
+            .collect();
+        let Some(current) = collisions
+            .iter()
+            .find(|candidate| !pending.choices.contains_key(&candidate.destination))
+            .copied()
+        else {
+            return;
+        };
+        let current_number = collisions
+            .iter()
+            .position(|candidate| candidate.destination == current.destination)
+            .unwrap_or(0)
+            + 1;
+        let total = collisions.len();
+        let source = current.source.clone();
+        let destination = current.destination.clone();
+        let mut apply_to_all = pending.apply_to_all;
+        let mut choice = None;
+        let mut cancel = false;
+        let palette = Palette::for_theme(&self.effective_theme);
+
+        egui::Window::new("File Name Collision")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(500.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(format!("Item {current_number} of {total}"))
+                        .size(11.5)
+                        .color(palette.text_tertiary),
+                );
+                ui.add_space(4.0);
+                ui.label("An item with the same name already exists.");
+                ui.add_space(10.0);
+                settings_path_row(ui, "From", &source, &palette);
+                settings_path_row(ui, "Existing", &destination, &palette);
+                ui.add_space(10.0);
+                ui.checkbox(
+                    &mut apply_to_all,
+                    "Apply this choice to all remaining collisions",
+                );
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button(egui::RichText::new("Replace").color(palette.error))
+                        .on_hover_text("Replace the existing item")
+                        .clicked()
+                    {
+                        choice = Some(CollisionChoice::Replace);
+                    }
+                    if ui
+                        .button("Keep Both")
+                        .on_hover_text("Create a new name and preserve both items")
+                        .clicked()
+                    {
+                        choice = Some(CollisionChoice::KeepBoth);
+                    }
+                    if ui
+                        .button("Skip")
+                        .on_hover_text("Do not copy or move this item")
+                        .clicked()
+                    {
+                        choice = Some(CollisionChoice::Skip);
+                    }
+                    if ui.button("Cancel Paste").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.pending_paste = None;
+            self.status = "Paste cancelled before files were changed.".into();
+            return;
+        }
+        let Some(choice) = choice else {
+            if let Some(pending) = &mut self.pending_paste {
+                pending.apply_to_all = apply_to_all;
+            }
+            return;
+        };
+
+        if let Some(pending) = &mut self.pending_paste {
+            pending.apply_to_all = apply_to_all;
+            pending.choices.insert(destination, choice);
+            if apply_to_all {
+                for candidate in &pending.preparation.candidates {
+                    if candidate.collision {
+                        pending
+                            .choices
+                            .entry(candidate.destination.clone())
+                            .or_insert(choice);
+                    }
+                }
+            }
+        }
+
+        let ready = self.pending_paste.as_ref().is_some_and(|pending| {
+            pending
+                .preparation
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.collision)
+                .all(|candidate| pending.choices.contains_key(&candidate.destination))
+        });
+        if ready {
+            let pending = self.pending_paste.take().expect("pending paste");
+            match pending.preparation.resolve(&pending.choices) {
+                Ok(request) => self.start_transfer(request),
+                Err(error) => self.status = format!("Could not resolve paste collisions: {error}"),
+            }
+        }
+    }
+
+    fn render_task_center(&mut self, ctx: &egui::Context) {
+        enum TaskAction {
+            Pause(OperationId),
+            Resume(OperationId),
+            Cancel(OperationId),
+            Retry(OperationId),
+        }
+
+        let palette = Palette::for_theme(&self.effective_theme);
+        let mut open = self.show_task_center;
+        let mut actions = Vec::new();
+        let mut clear_finished = false;
+
+        egui::Window::new("Task Center")
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_size(egui::vec2(620.0, 420.0))
+            .min_width(500.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} active", self.operations.active_count()))
+                            .color(palette.text_secondary),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Clear Finished").clicked() {
+                            clear_finished = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let mut any = false;
+                        for record in self.operations.records().rev() {
+                            any = true;
+                            ui.add_space(7.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&record.title)
+                                        .strong()
+                                        .color(palette.text_primary),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(record.state.label())
+                                                .size(11.5)
+                                                .color(operation_state_color(
+                                                    record.state,
+                                                    &palette,
+                                                )),
+                                        );
+                                    },
+                                );
+                            });
+                            ui.add(
+                                egui::ProgressBar::new(record.progress_fraction())
+                                    .desired_width(ui.available_width())
+                                    .show_percentage(),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(operation_metrics(record))
+                                        .size(11.5)
+                                        .color(palette.text_secondary),
+                                );
+                                if let Some(path) = &record.current_path {
+                                    ui.label(
+                                        egui::RichText::new(elide_middle(
+                                            &path.to_string_lossy(),
+                                            68,
+                                        ))
+                                        .size(11.5)
+                                        .color(palette.text_tertiary),
+                                    );
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                match record.state {
+                                    OperationState::Running if record.pausable() => {
+                                        if ui.small_button("Pause").clicked() {
+                                            actions.push(TaskAction::Pause(record.id));
+                                        }
+                                    }
+                                    OperationState::Paused => {
+                                        if ui.small_button("Resume").clicked() {
+                                            actions.push(TaskAction::Resume(record.id));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                if record.state.is_active() && ui.small_button("Cancel").clicked() {
+                                    actions.push(TaskAction::Cancel(record.id));
+                                }
+                                if record.state.can_retry() && ui.small_button("Retry").clicked() {
+                                    actions.push(TaskAction::Retry(record.id));
+                                }
+                            });
+                            if !record.errors.is_empty() {
+                                egui::CollapsingHeader::new(format!(
+                                    "{} error(s)",
+                                    record.errors.len()
+                                ))
+                                .show(ui, |ui| {
+                                    for error in &record.errors {
+                                        let path = if error.path.as_os_str().is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!("{}: ", error.path.display())
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!("{path}{}", error.message))
+                                                .size(11.5)
+                                                .color(palette.error),
+                                        );
+                                    }
+                                });
+                            }
+                            ui.add_space(7.0);
+                            ui.separator();
+                        }
+                        if !any {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new("No file operations yet.")
+                                        .color(palette.text_secondary),
+                                );
+                            });
+                        }
+                    });
+            });
+
+        for action in actions {
+            match action {
+                TaskAction::Pause(id) => self.operations.pause(id),
+                TaskAction::Resume(id) => self.operations.resume(id),
+                TaskAction::Cancel(id) => self.operations.cancel(id),
+                TaskAction::Retry(id) => match self.operations.retry(id) {
+                    Ok(Some(_)) => self.status = "Operation retry started.".into(),
+                    Ok(None) => {}
+                    Err(error) => self.status = error,
+                },
+            }
+        }
+        if clear_finished {
+            self.operations.clear_finished();
+        }
+        self.show_task_center = open;
     }
 
     fn render_initial_state(&mut self, ui: &mut egui::Ui) {
@@ -2227,8 +2923,10 @@ impl LuxePixApp {
                         let tile_w = tile_width;
                         let thumb_h = (tile_w * 0.75).max(86.0);
                         let tile_h = thumb_h + 58.0;
-                        let (rect, tile_resp) = ui
-                            .allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
+                        let (rect, tile_resp) = ui.allocate_exact_size(
+                            egui::vec2(tile_w, tile_h),
+                            egui::Sense::click_and_drag(),
+                        );
                         item_rects.push((folder.id.clone(), rect));
                         if pending_scroll.as_ref() == Some(&folder.id) {
                             tile_resp.scroll_to_me(Some(egui::Align::Center));
@@ -2253,7 +2951,7 @@ impl LuxePixApp {
                         let thumb_resp = ui.interact(
                             t_rect,
                             ui.id().with(("lt", &folder.id)),
-                            egui::Sense::click(),
+                            egui::Sense::click_and_drag(),
                         );
 
                         if let Some(ref p) = folder.first_image {
@@ -2309,6 +3007,22 @@ impl LuxePixApp {
                         } else if thumb_resp.clicked() || tile_resp.clicked() {
                             let modifiers = ui.input(|input| input.modifiers);
                             self.select_folder_with_modifiers(folder.id.clone(), modifiers);
+                        }
+                        if thumb_resp.drag_started() || tile_resp.drag_started() {
+                            self.begin_folder_drag(folder);
+                        }
+                        if self.internal_drag.is_some()
+                            && (thumb_resp.hovered() || tile_resp.hovered())
+                        {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            self.set_internal_drop_target(folder.path.clone(), modifiers);
+                        }
+                        if self.internal_drop_target_is(&folder.path) {
+                            ui.painter().rect_stroke(
+                                rect.shrink(2.0),
+                                6.0,
+                                egui::Stroke::new(2.0, palette.accent),
+                            );
                         }
                         if thumb_resp.secondary_clicked() || tile_resp.secondary_clicked() {
                             self.select_folder_for_context(folder.id.clone());
@@ -2397,6 +3111,23 @@ impl LuxePixApp {
                 ui.add_space(20.0);
             });
         self.left_scroll_offset = output.state.offset.y;
+        if self.internal_drag.is_some()
+            && self
+                .internal_drag
+                .as_ref()
+                .is_some_and(|drag| drag.target_dir.is_none())
+            && ui.input(|input| {
+                input
+                    .pointer
+                    .hover_pos()
+                    .is_some_and(|position| output.inner_rect.contains(position))
+            })
+        {
+            if let Some(path) = self.current_path.clone() {
+                let modifiers = ui.input(|input| input.modifiers);
+                self.set_internal_drop_target(path, modifiers);
+            }
+        }
         let finished_marquee = explorer::update_marquee_selection(
             ui,
             output.inner_rect,
@@ -2438,6 +3169,24 @@ impl LuxePixApp {
 
     fn render_right_pane(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let palette = Palette::for_theme(&self.effective_theme);
+        if self.internal_drag.is_some()
+            && ui.input(|input| {
+                input
+                    .pointer
+                    .hover_pos()
+                    .is_some_and(|position| ui.max_rect().contains(position))
+            })
+        {
+            if let Some(path) = self.selected_folder_path() {
+                let modifiers = ui.input(|input| input.modifiers);
+                self.set_internal_drop_target(path, modifiers);
+                ui.painter().rect_stroke(
+                    ui.max_rect().shrink(2.0),
+                    4.0,
+                    egui::Stroke::new(2.0, palette.accent),
+                );
+            }
+        }
         let folder_name = self
             .selected_folder_entry()
             .map(|folder| folder.name.clone())
@@ -2501,8 +3250,10 @@ impl LuxePixApp {
                         let tile_w = tile_width;
                         let info_h = 48.0;
                         let tile_h = tile_w + info_h;
-                        let (rect, tile_resp) = ui
-                            .allocate_exact_size(egui::vec2(tile_w, tile_h), egui::Sense::click());
+                        let (rect, tile_resp) = ui.allocate_exact_size(
+                            egui::vec2(tile_w, tile_h),
+                            egui::Sense::click_and_drag(),
+                        );
                         item_rects.push((file.id.clone(), rect));
                         if pending_scroll.as_ref() == Some(&file.id) {
                             tile_resp.scroll_to_me(Some(egui::Align::Center));
@@ -2524,7 +3275,7 @@ impl LuxePixApp {
                         let thumb_resp = ui.interact(
                             t_rect,
                             ui.id().with(("rt", &file.id)),
-                            egui::Sense::click(),
+                            egui::Sense::click_and_drag(),
                         );
 
                         if file.is_image {
@@ -2588,6 +3339,9 @@ impl LuxePixApp {
                         } else if thumb_resp.clicked() || tile_resp.clicked() {
                             let modifiers = ui.input(|input| input.modifiers);
                             self.select_file_with_modifiers(file.id.clone(), modifiers);
+                        }
+                        if thumb_resp.drag_started() || tile_resp.drag_started() {
+                            self.begin_file_drag(file);
                         }
                         if tile_resp.secondary_clicked() || thumb_resp.secondary_clicked() {
                             self.select_file_for_context(file.id.clone());
@@ -3178,6 +3932,47 @@ fn status_color(status: &str, palette: &Palette) -> egui::Color32 {
         palette.warning
     } else {
         palette.text_tertiary
+    }
+}
+
+fn operation_state_color(state: OperationState, palette: &Palette) -> egui::Color32 {
+    match state {
+        OperationState::Completed => palette.success,
+        OperationState::CompletedWithErrors | OperationState::Failed => palette.error,
+        OperationState::Cancelled | OperationState::Paused => palette.warning,
+        OperationState::Running => palette.accent,
+    }
+}
+
+fn operation_metrics(record: &OperationRecord) -> String {
+    let mut parts = vec![format!(
+        "{} / {} item(s)",
+        record.completed_items, record.total_items
+    )];
+    if record.total_bytes > 0 {
+        parts.push(format!(
+            "{} / {}",
+            format_size(record.processed_bytes.min(record.total_bytes)),
+            format_size(record.total_bytes)
+        ));
+    }
+    if let Some(speed) = record.speed_bytes_per_second() {
+        parts.push(format!("{}/s", format_size(speed.max(0.0) as u64)));
+    }
+    if let Some(remaining) = record.estimated_remaining() {
+        parts.push(format!("{} remaining", format_duration_short(remaining)));
+    }
+    parts.join("  -  ")
+}
+
+fn format_duration_short(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
     }
 }
 
@@ -4192,93 +4987,51 @@ fn parse_shortcut_key(name: &str) -> Option<egui::Key> {
     }
 }
 
-fn unique_destination(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
+fn default_drop_mode(
+    sources: &[PathBuf],
+    target_dir: &Path,
+    modifiers: egui::Modifiers,
+) -> TransferMode {
+    if modifiers.ctrl {
+        return TransferMode::Copy;
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("item");
-    let ext = path.extension().and_then(|e| e.to_str());
-    for i in 1..10_000 {
-        let suffix = if i == 1 {
-            " - Copy".to_string()
-        } else {
-            format!(" - Copy {}", i)
-        };
-        let name = if let Some(ext) = ext {
-            format!("{}{}.{}", stem, suffix, ext)
-        } else {
-            format!("{}{}", stem, suffix)
-        };
-        let candidate = parent.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
+    if modifiers.shift {
+        return TransferMode::Move;
     }
-    parent.join(format!("{} - Copy {}", stem, uuid_like_suffix()))
-}
 
-fn uuid_like_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().to_string())
-        .unwrap_or_else(|_| "new".into())
-}
-
-fn copy_path(src: &Path, dst: &Path) -> io::Result<()> {
-    if src.is_dir() {
-        copy_dir_recursive(src, dst)
+    let Some(target_volume) = volume_key(target_dir) else {
+        return TransferMode::Copy;
+    };
+    if !sources.is_empty()
+        && sources
+            .iter()
+            .all(|source| volume_key(source).as_ref() == Some(&target_volume))
+    {
+        TransferMode::Move
     } else {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(src, dst)?;
-        Ok(())
+        TransferMode::Copy
     }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
-
-fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
-    match fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(rename_err) => {
-            copy_path(src, dst)?;
-            let cleanup = if src.is_dir() {
-                fs::remove_dir_all(src)
-            } else {
-                fs::remove_file(src)
-            };
-            cleanup.map_err(|cleanup_err| {
-                io::Error::new(
-                    cleanup_err.kind(),
-                    format!(
-                        "moved by copy but cleanup failed after rename error '{}': {}",
-                        rename_err, cleanup_err
-                    ),
-                )
-            })
-        }
+fn volume_key(path: &Path) -> Option<String> {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => Some(
+            prefix
+                .as_os_str()
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_ascii_lowercase(),
+        ),
+        Some(Component::RootDir) => Some("\\".into()),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::breadcrumb_segments;
+    use super::{breadcrumb_segments, default_drop_mode};
+    use crate::file_ops::TransferMode;
+    use eframe::egui;
     use std::path::PathBuf;
 
     #[test]
@@ -4307,5 +5060,50 @@ mod tests {
         assert_eq!(segments[0].1, PathBuf::from(r"C:\"));
         assert_eq!(segments[1].0, "Products");
         assert_eq!(segments[2].0, "Nails");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drag_drop_uses_windows_volume_and_modifier_rules() {
+        let sources = vec![PathBuf::from(r"C:\Products\1001\photo.jpg")];
+
+        assert_eq!(
+            default_drop_mode(
+                &sources,
+                std::path::Path::new(r"C:\Products\1002"),
+                egui::Modifiers::default(),
+            ),
+            TransferMode::Move
+        );
+        assert_eq!(
+            default_drop_mode(
+                &sources,
+                std::path::Path::new(r"D:\Archive"),
+                egui::Modifiers::default(),
+            ),
+            TransferMode::Copy
+        );
+        assert_eq!(
+            default_drop_mode(
+                &sources,
+                std::path::Path::new(r"C:\Products\1002"),
+                egui::Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            ),
+            TransferMode::Copy
+        );
+        assert_eq!(
+            default_drop_mode(
+                &sources,
+                std::path::Path::new(r"D:\Archive"),
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            ),
+            TransferMode::Move
+        );
     }
 }
