@@ -1245,6 +1245,7 @@ mod tests {
         }
         timings.sort_unstable();
         let p95 = timings[(timings.len() * 95 / 100).min(timings.len() - 1)];
+        println!("100,000-product prefix-search p95: {p95:?}");
 
         assert!(
             p95 < Duration::from_millis(100),

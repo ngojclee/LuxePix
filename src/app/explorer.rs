@@ -2,9 +2,26 @@ use super::*;
 
 impl LuxePixApp {
     pub(super) fn render_explorer_toolbar(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        #[derive(Clone, Copy)]
+        enum ToolAction {
+            BatchRename,
+            FindDuplicates,
+            CreateZip,
+            ExtractZip,
+            FolderSizes,
+        }
+
         let mut view_changed = false;
         let mut sort_changed = false;
         let mut hidden_changed = false;
+        let mut tool_action = None;
+        let selected_paths = self.selected_paths();
+        let has_selection = !selected_paths.is_empty();
+        let can_extract_zip = selected_paths.iter().any(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        });
+        let power_tool_idle = self.power_tools.active_count() == 0;
 
         egui::Frame::none()
             .fill(palette.surface)
@@ -48,6 +65,61 @@ impl LuxePixApp {
                         .on_hover_text("Sort in descending order")
                         .changed();
 
+                    ui.menu_button("Tools", |ui| {
+                        if ui
+                            .add_enabled(
+                                power_tool_idle && has_selection,
+                                egui::Button::new("Batch Rename..."),
+                            )
+                            .clicked()
+                        {
+                            tool_action = Some(ToolAction::BatchRename);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                power_tool_idle && self.current_path.is_some(),
+                                egui::Button::new("Find Duplicates..."),
+                            )
+                            .clicked()
+                        {
+                            tool_action = Some(ToolAction::FindDuplicates);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                power_tool_idle && has_selection,
+                                egui::Button::new("Create ZIP..."),
+                            )
+                            .clicked()
+                        {
+                            tool_action = Some(ToolAction::CreateZip);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                power_tool_idle && (can_extract_zip || !has_selection),
+                                egui::Button::new("Extract ZIP..."),
+                            )
+                            .clicked()
+                        {
+                            tool_action = Some(ToolAction::ExtractZip);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                power_tool_idle && self.current_path.is_some(),
+                                egui::Button::new("Folder Sizes..."),
+                            )
+                            .clicked()
+                        {
+                            tool_action = Some(ToolAction::FolderSizes);
+                            ui.close_menu();
+                        }
+                    });
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         hidden_changed |= ui
                             .checkbox(&mut self.config.show_hidden_files, "Hidden")
@@ -64,6 +136,15 @@ impl LuxePixApp {
                     });
                 });
             });
+
+        match tool_action {
+            Some(ToolAction::BatchRename) => self.open_batch_rename_tool(),
+            Some(ToolAction::FindDuplicates) => self.start_duplicate_finder_tool(),
+            Some(ToolAction::CreateZip) => self.create_zip_from_selection(),
+            Some(ToolAction::ExtractZip) => self.extract_selected_zip(),
+            Some(ToolAction::FolderSizes) => self.start_folder_size_tool(),
+            None => {}
+        }
 
         if view_changed {
             self.right_scroll_offset = 0.0;

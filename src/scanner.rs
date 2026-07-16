@@ -188,7 +188,7 @@ mod tests {
     use super::{format_size, is_image_file, list_all_files, ScanOptions};
     use std::fs;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn recognizes_image_extensions_case_insensitively() {
@@ -226,5 +226,43 @@ mod tests {
         assert_eq!(hidden_off.len(), 1);
         assert_eq!(hidden_on.len(), 2);
         fs::remove_dir_all(root).expect("remove scan fixture");
+    }
+
+    #[test]
+    #[ignore = "performance gate; run with cargo test --release -- --ignored"]
+    fn lists_2000_items_under_300ms_p95() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("luxepix-scan-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&root).expect("create performance fixture");
+        for index in 0..2_000 {
+            fs::write(root.join(format!("SKU-{index:04}.jpg")), b"x")
+                .expect("write performance fixture");
+        }
+
+        let warmup =
+            list_all_files(&root, ScanOptions::default()).expect("warm up directory metadata");
+        assert_eq!(warmup.len(), 2_000);
+
+        let mut timings = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let files =
+                list_all_files(&root, ScanOptions::default()).expect("scan directory metadata");
+            timings.push(started.elapsed());
+            assert_eq!(files.len(), 2_000);
+        }
+        timings.sort_unstable();
+        let p95 = timings[(timings.len() * 95 / 100).min(timings.len() - 1)];
+        println!("2,000-item metadata p95: {p95:?}");
+
+        fs::remove_dir_all(root).expect("remove performance fixture");
+        assert!(
+            p95 < Duration::from_millis(300),
+            "2,000-item metadata p95 was {p95:?}"
+        );
     }
 }

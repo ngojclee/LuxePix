@@ -14,6 +14,7 @@ luxepix_config.json
 *.pdb
 *.zip
 *.exe
+!.docs/evidence/**/*.png
 
 # Temporary updater and test artifacts
 *.tmp

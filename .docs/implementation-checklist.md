@@ -117,46 +117,47 @@ This checklist follows:
 
 ## E6 - Update, Installer, Portable, And Releases
 
-- [!] Set GitHub owner/repository and public/private visibility.
-- [ ] Add non-blocking startup update check.
-- [ ] Add manual `Check for Updates`.
-- [ ] Show version, notes, size, and approval before download.
-- [ ] Add release manifest and semantic-version validation.
-- [ ] Add SHA-256 and byte-length verification.
-- [ ] Add cancellable update download in Task Center.
-- [ ] Build `LuxePixUpdater.exe`.
-- [!] Prove portable replacement while the installed executable is locked.
-- [ ] Preserve portable `data` and `.portable`.
-- [ ] Add startup handshake and portable rollback.
-- [ ] Add Inno Setup installer with stable AppId.
-- [ ] Confirm removal/replacement of the prior installed version.
-- [ ] Preserve AppData during update and default uninstall.
-- [ ] Reopen LuxePix after installed update.
-- [ ] Add tag-driven GitHub Release workflow.
-- [ ] Produce portable ZIP, installer, manifest, checksums, and notes.
+- [x] Set GitHub owner/repository and public visibility.
+- [x] Add non-blocking startup update check.
+- [x] Add manual `Check for Updates`.
+- [x] Show version, notes, size, and approval before download.
+- [x] Add release manifest and semantic-version validation.
+- [x] Add SHA-256 and byte-length verification.
+- [x] Add cancellable update download in Task Center.
+- [x] Build `LuxePixUpdater.exe`.
+- [x] Prove portable replacement while the application executable is locked.
+- [x] Preserve portable `data` and `.portable`.
+- [x] Add startup handshake and portable rollback.
+- [x] Add Inno Setup installer with stable AppId.
+- [x] Confirm removal/replacement of the prior installed version.
+- [x] Preserve AppData during update and default uninstall.
+- [x] Reopen LuxePix after installed update.
+- [x] Add tag-driven GitHub Release workflow.
+- [x] Produce portable ZIP, installer, manifest, checksums, and notes.
 
 ## E7 - Power Tools
 
-- [ ] Batch Rename with preview.
-- [ ] Duplicate Finder.
-- [ ] Archive and extract.
-- [ ] Folder Size analysis.
+- [x] Batch Rename with preview.
+- [x] Duplicate Finder.
+- [x] Archive and extract.
+- [x] Folder Size analysis.
 
 ## Quality And Acceptance
 
-- [~] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, and versions.
+- [x] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, versions, updates, power tools, and byte-bounded thumbnail caching.
 - [x] Add temp-directory integration tests for file operations and Undo.
 - [x] Add SQLite migration, rebuild, and search tests.
 - [x] Add pHash grouping and ranking tests.
-- [ ] Add portable updater transaction and rollback tests.
-- [ ] Capture Light/Dark/System screenshots.
-- [ ] Capture stable inline-rename screenshots.
-- [ ] Smoke-test installer and portable build in Windows Sandbox.
-- [ ] Verify first window appears within 1.5 seconds on the reference machine.
-- [ ] Verify 2,000-item folder metadata is usable within 300 ms.
+- [x] Add portable updater transaction and rollback tests.
+- [x] Capture Light/Dark/System screenshots.
+- [x] Capture stable inline-rename screenshots.
+- [x] Smoke-test installer and portable build with isolated Windows host fixtures.
+- [!] Repeat the installer and portable smoke in Windows Sandbox; Sandbox was unavailable in this release session.
+- [x] Verify first window appears within 1.5 seconds on the reference machine.
+- [x] Verify 2,000-item folder metadata is usable within 300 ms.
 - [x] Verify 100,000-entry prefix search is below 100 ms at p95.
-- [ ] Verify thumbnail memory stays inside the configured byte budget.
-- [ ] Confirm no image upload, telemetry, or persistent diagnostic logs.
+- [x] Verify thumbnail memory stays inside the configurable byte budget.
+- [x] Confirm no image upload, telemetry, or persistent diagnostic logs.
 
 ## Evidence Log
 
@@ -234,3 +235,33 @@ This checklist follows:
   tests including database migration, real hash persistence, product grouping,
   ranking and Model Pack validation, a locked release build, and a five-second
   release executable startup smoke test.
+- 2026-07-16: Completed E6 with non-blocking startup/manual GitHub checks,
+  semantic manifest validation, verified background downloads, a separate
+  updater helper, portable replacement/handshake/rollback, Inno Setup packaging,
+  and a tag-driven release workflow for `ngojclee/LuxePix`.
+- 2026-07-16: Portable update smoke held the old executable open, waited for
+  its process to exit, replaced it, completed the startup handshake, retained
+  `data`, `.portable`, and unrelated adjacent files, and left no transaction
+  debris.
+- 2026-07-16: Installer smoke with `/CURRENTUSER` completed install, update,
+  and uninstall with exit code 0; replaced a deliberately damaged updater,
+  reopened LuxePix after update, removed uninstall registration, and retained
+  AppData by default.
+- 2026-07-16: Completed E7 Batch Rename, Duplicate Finder, ZIP create/extract,
+  and Folder Size analysis with preview, safety validation, background work,
+  Task Center integration, and temp-directory tests.
+- 2026-07-16: Captured Light, Dark, System, and stable inline-rename evidence
+  under `.docs/evidence/v1.1.0/`; first-window timing was 533 ms.
+- 2026-07-16: Release-mode performance gates measured 37.6846 ms p95 for
+  metadata from a 2,000-item folder and 9.9372 ms p95 for prefix search across
+  100,000 products.
+- 2026-07-16: Replaced count-based thumbnail eviction with configurable
+  byte-bounded LRU caching (256 MB default, 64-2,048 MB range), bounded the
+  decode result queue, and added focused budget/eviction tests.
+- 2026-07-16: Source audit found outbound network access only in the GitHub
+  updater and explicit release-link opening. No image upload, telemetry,
+  analytics, or persistent diagnostic logging was found.
+- 2026-07-16: Final automated candidate gates passed with 4 updater tests,
+  72 application tests, and 2 explicit release-only performance tests.
+  Remaining feasibility items are documented in E3-E5 and the Windows Sandbox
+  repeat remains an environment follow-up.

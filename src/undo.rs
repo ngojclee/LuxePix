@@ -58,6 +58,21 @@ impl UndoManager {
         });
     }
 
+    pub fn push_batch_rename(&mut self, pairs: &[(PathBuf, PathBuf)]) {
+        if pairs.is_empty() {
+            return;
+        }
+        self.push(UndoEntry {
+            label: format!("Undo Batch Rename ({} item(s))", pairs.len()),
+            action: UndoAction::MoveBack {
+                pairs: pairs
+                    .iter()
+                    .map(|(original, current)| (current.clone(), original.clone()))
+                    .collect(),
+            },
+        });
+    }
+
     pub fn push_new_folder(&mut self, path: PathBuf) {
         self.push(UndoEntry {
             label: "Undo New Folder".into(),

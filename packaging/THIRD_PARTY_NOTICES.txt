@@ -1,0 +1,14 @@
+LuxePix Third-Party Notices
+============================
+
+LuxePix is built with open-source Rust libraries. Their package metadata,
+source links, license identifiers, and complete license texts are available
+from the corresponding crates published through crates.io and from the
+LuxePix source repository's Cargo.lock dependency manifest.
+
+Key runtime libraries include eframe/egui, image, rusqlite/SQLite, rayon,
+serde, sha2, ureq/rustls, zip, regex, walkdir, and windows-rs.
+
+Each third-party component remains licensed by its respective copyright
+holder under the license declared by that component. This notice does not
+change or replace those licenses.

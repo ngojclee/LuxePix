@@ -23,5 +23,14 @@
 - [x] Initialize the local Git repository and build E0-E4 checkpoints.
 - [x] Add local product-code Quick Find with SQLite indexing.
 - [x] Add pHash-based Find Product by Image with local-only inputs and fallback.
-- [ ] Complete updater, installer, portable packaging, and GitHub release.
-- [ ] Complete power tools and final Windows acceptance evidence.
+- [x] Complete updater, installer, and portable packaging.
+- [x] Complete Batch Rename, Duplicate Finder, ZIP, and Folder Size tools.
+- [x] Capture final Windows host acceptance and UI evidence.
+- [ ] Publish the verified `v1.1.0` tag and assets to GitHub Releases.
+
+## Documented Follow-Ups
+- [ ] Prove outbound OLE drag from LuxePix into Windows Explorer.
+- [ ] Prove exact Ctrl+Z restoration for Recycle Bin deletes.
+- [ ] Validate native network-share notifications; bounded polling is active.
+- [ ] Select and distribute an ONNX Model Pack/helper; pHash fallback is active.
+- [ ] Repeat package smoke tests in Windows Sandbox.

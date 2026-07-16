@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  LUXEPIX_GITHUB_OWNER: ${{ github.repository_owner }}
+  LUXEPIX_GITHUB_REPO: ${{ github.event.repository.name }}
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Verify tag and package version
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}".TrimStart("v")
+          $cargo = Get-Content Cargo.toml -Raw
+          $match = [regex]::Match($cargo, '(?ms)^\[package\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"')
+          if (-not $match.Success -or $match.Groups["version"].Value -ne $tagVersion) {
+            throw "Tag version and Cargo.toml version do not match."
+          }
+
+      - name: Quality gates
+        shell: pwsh
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --all-targets --locked
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build release assets
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          .\packaging\build-release.ps1 -Version $version
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseDir = Join-Path "dist" "${{ github.ref_name }}"
+          gh release create "${{ github.ref_name }}" `
+            (Join-Path $releaseDir "LuxePix-${{ github.ref_name }}-windows-x64-portable.zip") `
+            (Join-Path $releaseDir "LuxePix-${{ github.ref_name }}-windows-x64-setup.exe") `
+            (Join-Path $releaseDir "release-manifest.json") `
+            (Join-Path $releaseDir "SHA256SUMS.txt") `
+            --title "LuxePix ${{ github.ref_name }}" `
+            --notes-file (Join-Path $releaseDir "release-notes.md") `
+            --verify-tag

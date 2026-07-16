@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use eframe::egui;
 
 use crate::commands::{CommandContext, CommandId};
-use crate::config::{AppConfig, ProductCodeMode, ShortcutConfig};
+use crate::config::{
+    AppConfig, ProductCodeMode, ShortcutConfig, MAX_THUMBNAIL_MEMORY_BUDGET_MB,
+    MIN_THUMBNAIL_MEMORY_BUDGET_MB,
+};
 use crate::file_ops::{self, CollisionChoice, TransferMode, TransferPreparation, TransferRequest};
 use crate::index::{IndexEvent, IndexManager, IndexState};
 use crate::model::{FileEntry, FolderEntry, ItemId, SortDirection, SortField, ViewMode};
@@ -13,6 +16,9 @@ use crate::navigation::NavigationHistory;
 use crate::operations::{
     OperationId, OperationManager, OperationOutcome, OperationRecord, OperationRequest,
     OperationState,
+};
+use crate::power_tools::{
+    BatchRenameRule, DuplicateGroup, FolderSizeEntry, PowerToolManager, PowerToolResult,
 };
 use crate::scanner::{format_size, ScanOptions};
 use crate::search::{ProductSearchResult, SearchManager, SearchResponse, SearchScope};
@@ -26,7 +32,10 @@ use crate::storage::{transactional_write, StoragePaths};
 use crate::tasks::{TaskEvent, TaskId, TaskKind, TaskManager};
 use crate::thumbs::ThumbManager;
 use crate::undo::UndoManager;
+use crate::updater::{StartupHandshake, UpdateManager, UpdateState};
 use crate::windows_shell;
+
+const FULL_IMAGE_MEMORY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 mod details;
 mod explorer;
@@ -111,6 +120,8 @@ pub struct LuxePixApp {
     index: IndexManager,
     search: SearchManager,
     similarity: SimilarityManager,
+    updates: UpdateManager,
+    power_tools: PowerToolManager,
 
     // Rename state
     renaming: Option<RenameState>,
@@ -154,6 +165,20 @@ pub struct LuxePixApp {
     similarity_selected: usize,
     similarity_running: bool,
     model_pack_status: String,
+    show_update_dialog: bool,
+    startup_update_check_pending: bool,
+    startup_handshake: Option<StartupHandshake>,
+    first_frame_complete: bool,
+    show_batch_rename: bool,
+    batch_rename_paths: Vec<PathBuf>,
+    batch_rename_rule: BatchRenameRule,
+    show_duplicate_finder: bool,
+    duplicate_root: Option<PathBuf>,
+    duplicate_groups: Vec<DuplicateGroup>,
+    duplicate_selected: HashSet<PathBuf>,
+    show_folder_sizes: bool,
+    folder_size_root: Option<PathBuf>,
+    folder_size_entries: Vec<FolderSizeEntry>,
 
     status: String,
 }
@@ -269,7 +294,14 @@ impl LuxePixApp {
         };
         similarity_engine.set_model_pack(model_pack_result.ok().flatten());
         let similarity = SimilarityManager::new(similarity_engine, storage.similarity_dir.clone());
+        let (startup_handshake, startup_handshake_error) =
+            match crate::updater::startup_handshake_from_args() {
+                Ok(handshake) => (handshake, None),
+                Err(error) => (None, Some(error)),
+            };
         let effective_theme = apply_theme(&cc.egui_ctx, &config.theme).to_string();
+        let startup_update_check_pending = config.check_updates_on_startup;
+        let thumbnail_memory_budget_bytes = config.thumbnail_memory_budget_bytes();
         let shortcut_draft = config.shortcuts.clone();
         let first_run_source = config
             .sources
@@ -307,8 +339,8 @@ impl LuxePixApp {
             root_view_states: HashMap::new(),
             folder_view_states: HashMap::new(),
             preview: None,
-            thumb_mgr: ThumbManager::new(3000, 4),
-            full_mgr: ThumbManager::new(5, 2),
+            thumb_mgr: ThumbManager::new(thumbnail_memory_budget_bytes, 4),
+            full_mgr: ThumbManager::new(FULL_IMAGE_MEMORY_BUDGET_BYTES, 2),
             tasks: TaskManager::new(4),
             root_scan_task: None,
             folder_scan_task: None,
@@ -317,6 +349,8 @@ impl LuxePixApp {
             index,
             search,
             similarity,
+            updates: UpdateManager::new(),
+            power_tools: PowerToolManager::new(),
             renaming: None,
             storage,
             config,
@@ -356,7 +390,22 @@ impl LuxePixApp {
             similarity_selected: 0,
             similarity_running: false,
             model_pack_status,
-            status: "Ready. Pick a folder above or choose a recent path.".into(),
+            show_update_dialog: false,
+            startup_update_check_pending,
+            startup_handshake,
+            first_frame_complete: false,
+            show_batch_rename: false,
+            batch_rename_paths: Vec::new(),
+            batch_rename_rule: BatchRenameRule::default(),
+            show_duplicate_finder: false,
+            duplicate_root: None,
+            duplicate_groups: Vec::new(),
+            duplicate_selected: HashSet::new(),
+            show_folder_sizes: false,
+            folder_size_root: None,
+            folder_size_entries: Vec::new(),
+            status: startup_handshake_error
+                .unwrap_or_else(|| "Ready. Pick a folder above or choose a recent path.".into()),
         };
 
         if let Some(ref last) = app.config.last_path.clone() {
@@ -928,6 +977,256 @@ impl LuxePixApp {
         }
     }
 
+    fn start_update_check(&mut self, manual: bool) {
+        match self.updates.start_check(self.storage.mode, manual) {
+            Ok(()) => {
+                if manual {
+                    self.status = "Checking GitHub Releases for a LuxePix update...".into();
+                }
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn process_update_events(&mut self) {
+        if !self.updates.process_events(64) {
+            return;
+        }
+        match self.updates.state() {
+            UpdateState::Current => {
+                self.status = format!("LuxePix {} is up to date.", crate::version::display());
+            }
+            UpdateState::Available(offer) => {
+                self.status = format!("LuxePix {} is available.", offer.version);
+                self.show_update_dialog = true;
+            }
+            UpdateState::Ready(package) => {
+                self.status = format!("LuxePix {} downloaded and verified.", package.offer.version);
+                self.show_update_dialog = true;
+            }
+            UpdateState::Failed {
+                message,
+                manual: true,
+            } => {
+                self.status = message.clone();
+            }
+            UpdateState::Idle
+            | UpdateState::Checking
+            | UpdateState::Downloading { .. }
+            | UpdateState::Failed { manual: false, .. } => {}
+        }
+    }
+
+    fn start_update_download(&mut self, offer: crate::updater::UpdateOffer) {
+        match self
+            .updates
+            .start_download(offer, &self.storage.updates_dir)
+        {
+            Ok(()) => {
+                self.show_update_dialog = false;
+                self.show_task_center = true;
+                self.status = "Downloading the verified LuxePix update package...".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn apply_verified_update(&mut self, ctx: &egui::Context) {
+        let UpdateState::Ready(package) = self.updates.state().clone() else {
+            self.status = "No verified update package is ready.".into();
+            return;
+        };
+        match crate::updater::launch_verified_package(&package, &self.storage) {
+            Ok(()) => {
+                self.status = "Updater started. Closing LuxePix...".into();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => {
+                self.status = error;
+                self.show_update_dialog = true;
+            }
+        }
+    }
+
+    fn open_batch_rename_tool(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.status = "Select one or more items before opening Batch Rename.".into();
+            return;
+        }
+        self.batch_rename_paths = paths;
+        self.batch_rename_rule = BatchRenameRule::default();
+        self.show_batch_rename = true;
+    }
+
+    fn start_duplicate_finder_tool(&mut self) {
+        let root = self
+            .selected_folder_path()
+            .or_else(|| self.current_path.clone());
+        let Some(root) = root else {
+            self.status = "Choose a source folder before finding duplicates.".into();
+            return;
+        };
+        match self.power_tools.start_duplicate_scan(root.clone()) {
+            Ok(()) => {
+                self.duplicate_root = Some(root);
+                self.duplicate_groups.clear();
+                self.duplicate_selected.clear();
+                self.show_duplicate_finder = false;
+                self.show_task_center = true;
+                self.status = "Scanning files and hashing same-size candidates...".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn create_zip_from_selection(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.status = "Select one or more files or folders to create a ZIP archive.".into();
+            return;
+        }
+        let parent = paths[0].parent().unwrap_or_else(|| Path::new("."));
+        let default_name = if paths.len() == 1 {
+            format!(
+                "{}.zip",
+                paths[0]
+                    .file_stem()
+                    .unwrap_or_else(|| paths[0].file_name().unwrap_or_default())
+                    .to_string_lossy()
+            )
+        } else {
+            "Archive.zip".into()
+        };
+        let Some(mut destination) = rfd::FileDialog::new()
+            .add_filter("ZIP archive", &["zip"])
+            .set_directory(parent)
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        if destination
+            .extension()
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("zip"))
+        {
+            destination.set_extension("zip");
+        }
+        destination = crate::power_tools::unique_destination(&destination);
+        match self
+            .power_tools
+            .start_create_archive(paths, destination.clone())
+        {
+            Ok(()) => {
+                self.show_task_center = true;
+                self.status = format!("Creating {}...", destination.display());
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn extract_selected_zip(&mut self) {
+        let selected = self.selected_paths();
+        let archive = selected
+            .iter()
+            .find(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+            })
+            .cloned()
+            .or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("ZIP archive", &["zip"])
+                    .pick_file()
+            });
+        let Some(archive) = archive else {
+            return;
+        };
+        let parent = archive.parent().unwrap_or_else(|| Path::new("."));
+        let folder_name = archive
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let destination = crate::power_tools::unique_destination(&parent.join(folder_name));
+        match self
+            .power_tools
+            .start_extract_archive(archive.clone(), destination.clone())
+        {
+            Ok(()) => {
+                self.show_task_center = true;
+                self.status = format!("Extracting {}...", archive.display());
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn start_folder_size_tool(&mut self) {
+        let Some(root) = self.current_path.clone() else {
+            self.status = "Choose a source folder before analyzing folder sizes.".into();
+            return;
+        };
+        match self.power_tools.start_folder_sizes(root.clone()) {
+            Ok(()) => {
+                self.folder_size_root = Some(root);
+                self.folder_size_entries.clear();
+                self.show_folder_sizes = false;
+                self.show_task_center = true;
+                self.status = "Calculating folder sizes...".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn process_power_tool_events(&mut self) {
+        for completion in self.power_tools.process_events(32) {
+            match completion.result {
+                Ok(PowerToolResult::BatchRenamed(pairs)) => {
+                    let count = pairs.len();
+                    self.undo.push_batch_rename(&pairs);
+                    self.request_index_reconcile();
+                    self.refresh_current_view();
+                    self.status = format!("Batch renamed {count} item(s).");
+                }
+                Ok(PowerToolResult::Duplicates { root, groups }) => {
+                    let duplicate_files: usize = groups.iter().map(|group| group.paths.len()).sum();
+                    self.duplicate_root = Some(root);
+                    self.duplicate_groups = groups;
+                    self.duplicate_selected.clear();
+                    self.show_duplicate_finder = true;
+                    self.status = format!(
+                        "Duplicate Finder found {} group(s) across {duplicate_files} file(s).",
+                        self.duplicate_groups.len()
+                    );
+                }
+                Ok(PowerToolResult::ArchiveCreated(path)) => {
+                    self.request_index_reconcile();
+                    self.refresh_current_view();
+                    self.status = format!("Created ZIP archive {}.", path.display());
+                }
+                Ok(PowerToolResult::ArchiveExtracted(path)) => {
+                    self.request_index_reconcile();
+                    self.refresh_current_view();
+                    self.status = format!("Extracted ZIP archive to {}.", path.display());
+                }
+                Ok(PowerToolResult::FolderSizes { root, entries }) => {
+                    self.folder_size_root = Some(root);
+                    self.folder_size_entries = entries;
+                    self.show_folder_sizes = true;
+                    self.status = format!(
+                        "Folder size analysis completed for {} folder(s).",
+                        self.folder_size_entries.len()
+                    );
+                }
+                Err(error) => {
+                    self.status = format!("{} failed: {error}", completion.kind.label());
+                }
+            }
+        }
+    }
+
     fn queue_quick_find_search(&mut self) {
         self.quick_find_dirty_since = Some(std::time::Instant::now());
         self.quick_find_running = !self.quick_find_query.trim().is_empty();
@@ -1149,6 +1448,18 @@ impl LuxePixApp {
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("explorer").arg(path).spawn();
+        }
+    }
+
+    fn open_url(url: &str) {
+        #[cfg(target_os = "windows")]
+        {
+            if url.starts_with("https://") {
+                let _ = std::process::Command::new("rundll32.exe")
+                    .arg("url.dll,FileProtocolHandler")
+                    .arg(url)
+                    .spawn();
+            }
         }
     }
 
@@ -1785,6 +2096,9 @@ impl LuxePixApp {
             || self.renaming.is_some()
             || self.show_settings
             || self.show_image_search
+            || self.show_batch_rename
+            || self.show_duplicate_finder
+            || self.show_folder_sizes
             || self.pending_paste.is_some()
             || self.pending_delete.is_some()
             || !self.config.first_run_complete
@@ -1806,6 +2120,9 @@ impl LuxePixApp {
             || self.renaming.is_some()
             || self.show_settings
             || self.show_image_search
+            || self.show_batch_rename
+            || self.show_duplicate_finder
+            || self.show_folder_sizes
             || !self.config.first_run_complete
             || ctx.wants_keyboard_input()
         {
@@ -1893,6 +2210,12 @@ impl eframe::App for LuxePixApp {
         self.submit_quick_find_if_ready();
         self.process_search_events();
         self.process_similarity_events();
+        self.process_update_events();
+        self.process_power_tool_events();
+        if self.first_frame_complete && self.startup_update_check_pending {
+            self.startup_update_check_pending = false;
+            self.start_update_check(false);
+        }
 
         // Process thumbnail results
         let loaded_thumbs = self.thumb_mgr.process_results(ctx);
@@ -2042,6 +2365,22 @@ impl eframe::App for LuxePixApp {
             self.render_task_center(ctx);
         }
 
+        if self.show_update_dialog {
+            self.render_update_dialog(ctx);
+        }
+
+        if self.show_batch_rename {
+            self.render_batch_rename_dialog(ctx);
+        }
+
+        if self.show_duplicate_finder {
+            self.render_duplicate_finder_dialog(ctx);
+        }
+
+        if self.show_folder_sizes {
+            self.render_folder_sizes_dialog(ctx);
+        }
+
         self.render_first_run(ctx);
 
         // (Rename is now inline in panes — no separate dialog needed)
@@ -2060,8 +2399,20 @@ impl eframe::App for LuxePixApp {
             || self.quick_find_running
             || self.quick_find_dirty_since.is_some()
             || self.similarity_running
+            || self.updates.is_active()
+            || self.power_tools.active_count() > 0
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
+        if !self.first_frame_complete {
+            self.first_frame_complete = true;
+            if let Some(handshake) = self.startup_handshake.take() {
+                if let Err(error) = handshake.complete() {
+                    self.status = format!("Could not complete update startup handshake: {error}");
+                }
+            }
+            ctx.request_repaint();
         }
     }
 }
@@ -2534,9 +2885,11 @@ impl LuxePixApp {
                     .color(palette.text_secondary),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let active_operations = self.operations.active_count();
-                let task_label = if active_operations > 0 {
-                    format!("Tasks ({active_operations})")
+                let active_tasks = self.operations.active_count()
+                    + self.updates.active_count()
+                    + self.power_tools.active_count();
+                let task_label = if active_tasks > 0 {
+                    format!("Tasks ({active_tasks})")
                 } else {
                     "Tasks".into()
                 };
@@ -2583,6 +2936,7 @@ impl LuxePixApp {
         let mut hidden_files_changed = false;
         let mut index_enabled_changed = false;
         let mut index_rules_changed = false;
+        let mut thumbnail_budget_changed = false;
         let mut rebuild_index = false;
         let mut pause_index = false;
         let mut resume_index = false;
@@ -2590,8 +2944,11 @@ impl LuxePixApp {
         let mut choose_model_pack = false;
         let mut clear_model_pack = false;
         let mut refresh_model_pack = false;
+        let mut check_updates_now = false;
         let mut close_window = false;
         let index_snapshot = self.index.snapshot().clone();
+        let update_status = self.updates.state().status_text();
+        let update_active = self.updates.is_active();
 
         egui::Window::new("Settings")
             .open(&mut open)
@@ -2622,6 +2979,29 @@ impl LuxePixApp {
                     .show(ui, |ui| match self.settings_tab {
                         SettingsTab::General => {
                             settings_heading(ui, "General", &palette);
+                            settings_value_row(
+                                ui,
+                                "Version",
+                                &crate::version::display(),
+                                &palette,
+                            );
+                            settings_value_row(
+                                ui,
+                                "Release source",
+                                &crate::updater::repository_label(),
+                                &palette,
+                            );
+                            settings_value_row(ui, "Updates", &update_status, &palette);
+                            if ui
+                                .add_enabled(
+                                    !update_active,
+                                    egui::Button::new("Check for Updates"),
+                                )
+                                .clicked()
+                            {
+                                check_updates_now = true;
+                            }
+                            ui.add_space(12.0);
                             config_changed |= ui
                                 .checkbox(
                                     &mut self.config.check_updates_on_startup,
@@ -2665,6 +3045,36 @@ impl LuxePixApp {
                                     "Active palette: {}",
                                     capitalize(&self.effective_theme)
                                 ))
+                                .color(palette.text_secondary),
+                            );
+                            ui.add_space(18.0);
+                            settings_heading(ui, "Thumbnail Memory", &palette);
+                            let budget_response = ui.add(
+                                egui::Slider::new(
+                                    &mut self.config.thumbnail_memory_budget_mb,
+                                    MIN_THUMBNAIL_MEMORY_BUDGET_MB
+                                        ..=MAX_THUMBNAIL_MEMORY_BUDGET_MB,
+                                )
+                                .suffix(" MB")
+                                .show_value(true),
+                            );
+                            thumbnail_budget_changed |= budget_response.changed();
+                            config_changed |= budget_response.changed();
+                            settings_value_row(
+                                ui,
+                                "In use",
+                                &format!(
+                                    "{} / {}",
+                                    format_size(self.thumb_mgr.cached_bytes() as u64),
+                                    format_size(self.thumb_mgr.byte_budget() as u64)
+                                ),
+                                &palette,
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Least-recently-used thumbnails are released automatically when this limit is reached.",
+                                )
+                                .size(11.5)
                                 .color(palette.text_secondary),
                             );
                         }
@@ -3083,6 +3493,10 @@ impl LuxePixApp {
                 self.status = format!("Could not save settings: {error}");
             }
         }
+        if thumbnail_budget_changed {
+            self.thumb_mgr
+                .set_byte_budget(self.config.thumbnail_memory_budget_bytes());
+        }
         if refresh_model_pack {
             self.refresh_model_pack();
         }
@@ -3123,6 +3537,9 @@ impl LuxePixApp {
         }
         if cancel_index {
             self.index.cancel();
+        }
+        if check_updates_now {
+            self.start_update_check(true);
         }
 
         if close_window {
@@ -3407,12 +3824,17 @@ impl LuxePixApp {
             Resume(OperationId),
             Cancel(OperationId),
             Retry(OperationId),
+            CancelUpdate,
+            ApplyUpdate,
+            CancelPowerTool,
         }
 
         let palette = Palette::for_theme(&self.effective_theme);
         let mut open = self.show_task_center;
         let mut actions = Vec::new();
         let mut clear_finished = false;
+        let update_state = self.updates.state().clone();
+        let power_task = self.power_tools.active().cloned();
 
         egui::Window::new("Task Center")
             .open(&mut open)
@@ -3422,8 +3844,11 @@ impl LuxePixApp {
             .min_width(500.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    let active = self.operations.active_count()
+                        + self.updates.active_count()
+                        + self.power_tools.active_count();
                     ui.label(
-                        egui::RichText::new(format!("{} active", self.operations.active_count()))
+                        egui::RichText::new(format!("{active} active"))
                             .color(palette.text_secondary),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3438,6 +3863,198 @@ impl LuxePixApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let mut any = false;
+                        match &update_state {
+                            UpdateState::Checking => {
+                                any = true;
+                                ui.add_space(7.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Check for LuxePix updates")
+                                            .strong()
+                                            .color(palette.text_primary),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.spinner();
+                                            ui.label(
+                                                egui::RichText::new("Running")
+                                                    .size(11.5)
+                                                    .color(palette.accent),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.label(
+                                    egui::RichText::new(crate::updater::repository_label())
+                                        .size(11.5)
+                                        .color(palette.text_secondary),
+                                );
+                                ui.add_space(7.0);
+                                ui.separator();
+                            }
+                            UpdateState::Downloading { offer, downloaded } => {
+                                any = true;
+                                ui.add_space(7.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Download LuxePix {}",
+                                            offer.version
+                                        ))
+                                        .strong()
+                                        .color(palette.text_primary),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Running")
+                                                    .size(11.5)
+                                                    .color(palette.accent),
+                                            );
+                                        },
+                                    );
+                                });
+                                let fraction = if offer.asset.byte_length == 0 {
+                                    0.0
+                                } else {
+                                    (*downloaded as f64 / offer.asset.byte_length as f64)
+                                        .clamp(0.0, 1.0) as f32
+                                };
+                                ui.add(
+                                    egui::ProgressBar::new(fraction)
+                                        .desired_width(ui.available_width())
+                                        .show_percentage(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} of {}",
+                                        crate::updater::format_bytes(*downloaded),
+                                        crate::updater::format_bytes(offer.asset.byte_length)
+                                    ))
+                                    .size(11.5)
+                                    .color(palette.text_secondary),
+                                );
+                                if ui.small_button("Cancel").clicked() {
+                                    actions.push(TaskAction::CancelUpdate);
+                                }
+                                ui.add_space(7.0);
+                                ui.separator();
+                            }
+                            UpdateState::Ready(package) => {
+                                any = true;
+                                ui.add_space(7.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "LuxePix {} update",
+                                            package.offer.version
+                                        ))
+                                        .strong()
+                                        .color(palette.text_primary),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Verified")
+                                                    .size(11.5)
+                                                    .color(palette.success),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.add(
+                                    egui::ProgressBar::new(1.0)
+                                        .desired_width(ui.available_width())
+                                        .show_percentage(),
+                                );
+                                if ui.small_button("Install and Restart").clicked() {
+                                    actions.push(TaskAction::ApplyUpdate);
+                                }
+                                ui.add_space(7.0);
+                                ui.separator();
+                            }
+                            UpdateState::Failed {
+                                message,
+                                manual: true,
+                            } => {
+                                any = true;
+                                ui.add_space(7.0);
+                                ui.label(
+                                    egui::RichText::new("LuxePix update")
+                                        .strong()
+                                        .color(palette.text_primary),
+                                );
+                                ui.label(
+                                    egui::RichText::new(message).size(11.5).color(palette.error),
+                                );
+                                ui.add_space(7.0);
+                                ui.separator();
+                            }
+                            UpdateState::Idle
+                            | UpdateState::Current
+                            | UpdateState::Available(_)
+                            | UpdateState::Failed { manual: false, .. } => {}
+                        }
+                        if let Some(task) = &power_task {
+                            any = true;
+                            ui.add_space(7.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&task.title)
+                                        .strong()
+                                        .color(palette.text_primary),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(task.kind.label())
+                                                .size(11.5)
+                                                .color(palette.accent),
+                                        );
+                                    },
+                                );
+                            });
+                            if task.total > 0 {
+                                ui.add(
+                                    egui::ProgressBar::new(task.progress_fraction())
+                                        .desired_width(ui.available_width())
+                                        .show_percentage(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} of {} item(s)",
+                                        task.completed, task.total
+                                    ))
+                                    .size(11.5)
+                                    .color(palette.text_secondary),
+                                );
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new("Preparing...")
+                                            .size(11.5)
+                                            .color(palette.text_secondary),
+                                    );
+                                });
+                            }
+                            if let Some(path) = &task.current_path {
+                                ui.label(
+                                    egui::RichText::new(elide_middle(&path.to_string_lossy(), 78))
+                                        .size(11.5)
+                                        .color(palette.text_tertiary),
+                                );
+                            }
+                            if ui.small_button("Cancel").clicked() {
+                                actions.push(TaskAction::CancelPowerTool);
+                            }
+                            ui.add_space(7.0);
+                            ui.separator();
+                        }
                         for record in self.operations.records().rev() {
                             any = true;
                             ui.add_space(7.0);
@@ -3548,12 +4165,675 @@ impl LuxePixApp {
                     Ok(None) => {}
                     Err(error) => self.status = error,
                 },
+                TaskAction::CancelUpdate => {
+                    self.updates.cancel_download();
+                    self.status = "Cancelling update download...".into();
+                }
+                TaskAction::ApplyUpdate => self.apply_verified_update(ctx),
+                TaskAction::CancelPowerTool => {
+                    self.power_tools.cancel();
+                    self.status = "Cancelling power tool...".into();
+                }
             }
         }
         if clear_finished {
             self.operations.clear_finished();
         }
         self.show_task_center = open;
+    }
+
+    fn render_update_dialog(&mut self, ctx: &egui::Context) {
+        enum UpdateAction {
+            Download(crate::updater::UpdateOffer),
+            Apply,
+            CancelDownload,
+            Later,
+            Retry,
+            OpenRelease(String),
+        }
+
+        let palette = Palette::for_theme(&self.effective_theme);
+        let state = self.updates.state().clone();
+        let mut open = self.show_update_dialog;
+        let mut action = None;
+
+        egui::Window::new("LuxePix Update")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(560.0, 390.0))
+            .min_width(480.0)
+            .show(ctx, |ui| match &state {
+                UpdateState::Available(offer) => {
+                    ui.label(
+                        egui::RichText::new(format!("LuxePix {} is available", offer.version))
+                            .size(19.0)
+                            .strong()
+                            .color(palette.text_primary),
+                    );
+                    ui.add_space(8.0);
+                    settings_value_row(ui, "Installed", &crate::version::display(), &palette);
+                    settings_value_row(ui, "Available", &offer.version.to_string(), &palette);
+                    settings_value_row(ui, "Published", &offer.published_at, &palette);
+                    settings_value_row(ui, "Package", offer.asset.mode.label(), &palette);
+                    settings_value_row(
+                        ui,
+                        "Download",
+                        &crate::updater::format_bytes(offer.asset.byte_length),
+                        &palette,
+                    );
+                    ui.add_space(12.0);
+                    settings_heading(ui, "Release Notes", &palette);
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(if offer.notes.is_empty() {
+                                    "No release notes were supplied."
+                                } else {
+                                    &offer.notes
+                                })
+                                .color(palette.text_secondary),
+                            );
+                        });
+                    ui.add_space(12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Download and Update").clicked() {
+                            action = Some(UpdateAction::Download(offer.clone()));
+                        }
+                        if ui.button("Later").clicked() {
+                            action = Some(UpdateAction::Later);
+                        }
+                        if ui.button("Open Release Page").clicked() {
+                            action = Some(UpdateAction::OpenRelease(
+                                offer.release_url.clone(),
+                            ));
+                        }
+                    });
+                }
+                UpdateState::Downloading { offer, downloaded } => {
+                    ui.label(
+                        egui::RichText::new(format!("Downloading LuxePix {}", offer.version))
+                            .size(19.0)
+                            .strong()
+                            .color(palette.text_primary),
+                    );
+                    ui.add_space(14.0);
+                    let fraction = if offer.asset.byte_length == 0 {
+                        0.0
+                    } else {
+                        (*downloaded as f64 / offer.asset.byte_length as f64).clamp(0.0, 1.0)
+                            as f32
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(ui.available_width())
+                            .show_percentage(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} of {}",
+                            crate::updater::format_bytes(*downloaded),
+                            crate::updater::format_bytes(offer.asset.byte_length)
+                        ))
+                        .color(palette.text_secondary),
+                    );
+                    ui.add_space(12.0);
+                    if ui.button("Cancel Download").clicked() {
+                        action = Some(UpdateAction::CancelDownload);
+                    }
+                }
+                UpdateState::Ready(package) => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "LuxePix {} is verified",
+                            package.offer.version
+                        ))
+                        .size(19.0)
+                        .strong()
+                        .color(palette.text_primary),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "The package byte length and SHA-256 match the signed release manifest.",
+                        )
+                        .color(palette.success),
+                    );
+                    ui.add_space(10.0);
+                    settings_path_row(ui, "Package", &package.path, &palette);
+                    settings_value_row(
+                        ui,
+                        "Mode",
+                        package.offer.asset.mode.label(),
+                        &palette,
+                    );
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Install and Restart").clicked() {
+                            action = Some(UpdateAction::Apply);
+                        }
+                        if ui.button("Later").clicked() {
+                            action = Some(UpdateAction::Later);
+                        }
+                    });
+                }
+                UpdateState::Failed { message, .. } => {
+                    ui.label(
+                        egui::RichText::new("Update could not continue")
+                            .size(19.0)
+                            .strong()
+                            .color(palette.text_primary),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(message).color(palette.error));
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Try Again").clicked() {
+                            action = Some(UpdateAction::Retry);
+                        }
+                        if ui.button("Close").clicked() {
+                            action = Some(UpdateAction::Later);
+                        }
+                    });
+                }
+                UpdateState::Checking => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking GitHub Releases...");
+                    });
+                }
+                UpdateState::Current => {
+                    ui.label(
+                        egui::RichText::new("LuxePix is up to date")
+                            .size(19.0)
+                            .strong()
+                            .color(palette.text_primary),
+                    );
+                    if ui.button("Close").clicked() {
+                        action = Some(UpdateAction::Later);
+                    }
+                }
+                UpdateState::Idle => {
+                    ui.label("No update is currently selected.");
+                    if ui.button("Close").clicked() {
+                        action = Some(UpdateAction::Later);
+                    }
+                }
+            });
+
+        match action {
+            Some(UpdateAction::Download(offer)) => self.start_update_download(offer),
+            Some(UpdateAction::Apply) => self.apply_verified_update(ctx),
+            Some(UpdateAction::CancelDownload) => {
+                self.updates.cancel_download();
+                self.status = "Cancelling update download...".into();
+            }
+            Some(UpdateAction::Later) => {
+                self.updates.dismiss_offer();
+                open = false;
+            }
+            Some(UpdateAction::Retry) => {
+                open = false;
+                self.start_update_check(true);
+            }
+            Some(UpdateAction::OpenRelease(url)) => Self::open_url(&url),
+            None => {}
+        }
+        self.show_update_dialog = open;
+    }
+
+    fn render_batch_rename_dialog(&mut self, ctx: &egui::Context) {
+        let palette = Palette::for_theme(&self.effective_theme);
+        let paths = self.batch_rename_paths.clone();
+        let mut rule = self.batch_rename_rule.clone();
+        let mut open = self.show_batch_rename;
+        let mut apply = false;
+        let mut close = false;
+
+        egui::Window::new("Batch Rename")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(720.0, 560.0))
+            .min_width(620.0)
+            .show(ctx, |ui| {
+                settings_heading(ui, "Rename Rules", &palette);
+                egui::Grid::new("batch_rename_rules")
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.label("Find");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut rule.find)
+                                .desired_width(ui.available_width())
+                                .hint_text("Text to replace"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Replace with");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut rule.replace)
+                                .desired_width(ui.available_width()),
+                        );
+                        ui.end_row();
+
+                        ui.label("Prefix");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut rule.prefix)
+                                .desired_width(ui.available_width()),
+                        );
+                        ui.end_row();
+
+                        ui.label("Suffix");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut rule.suffix)
+                                .desired_width(ui.available_width()),
+                        );
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut rule.sequence_enabled, "Append sequence");
+                    ui.add_enabled_ui(rule.sequence_enabled, |ui| {
+                        ui.label("Start");
+                        ui.add(egui::DragValue::new(&mut rule.sequence_start).range(0..=999_999));
+                        ui.label("Digits");
+                        ui.add(egui::DragValue::new(&mut rule.sequence_padding).range(1..=12));
+                    });
+                });
+
+                let preview = crate::power_tools::preview_batch_rename(&paths, &rule);
+                let error_count = preview.iter().filter(|item| item.error.is_some()).count();
+                let changed_count = preview.iter().filter(|item| item.changed).count();
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    settings_heading(ui, "Preview", &palette);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{changed_count} change(s), {error_count} error(s)"
+                        ))
+                        .size(11.5)
+                        .color(if error_count == 0 {
+                            palette.text_secondary
+                        } else {
+                            palette.error
+                        }),
+                    );
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for item in &preview {
+                            let old_name = item
+                                .source
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            let new_name = item
+                                .destination
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(elide_middle(&old_name, 36))
+                                        .color(palette.text_secondary),
+                                );
+                                ui.label(egui::RichText::new("->").color(palette.text_tertiary));
+                                ui.label(egui::RichText::new(elide_middle(&new_name, 36)).color(
+                                    if item.error.is_some() {
+                                        palette.error
+                                    } else if item.changed {
+                                        palette.text_primary
+                                    } else {
+                                        palette.text_tertiary
+                                    },
+                                ));
+                            });
+                            if let Some(error) = &item.error {
+                                ui.label(
+                                    egui::RichText::new(error).size(11.0).color(palette.error),
+                                );
+                            }
+                            ui.separator();
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            error_count == 0
+                                && changed_count > 0
+                                && self.power_tools.active_count() == 0,
+                            egui::Button::new(format!("Rename {changed_count} Item(s)")),
+                        )
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        self.batch_rename_rule = rule;
+        if close {
+            open = false;
+        }
+        if apply {
+            let preview = crate::power_tools::preview_batch_rename(
+                &self.batch_rename_paths,
+                &self.batch_rename_rule,
+            );
+            match self.power_tools.start_batch_rename(preview) {
+                Ok(()) => {
+                    open = false;
+                    self.show_task_center = true;
+                    self.status = "Applying batch rename...".into();
+                }
+                Err(error) => self.status = error,
+            }
+        }
+        self.show_batch_rename = open;
+    }
+
+    fn render_duplicate_finder_dialog(&mut self, ctx: &egui::Context) {
+        let palette = Palette::for_theme(&self.effective_theme);
+        let groups = self.duplicate_groups.clone();
+        let root = self.duplicate_root.clone();
+        let all_paths: HashSet<PathBuf> = groups
+            .iter()
+            .flat_map(|group| group.paths.iter().cloned())
+            .collect();
+        let mut selected = self.duplicate_selected.clone();
+        selected.retain(|path| all_paths.contains(path));
+        let mut open = self.show_duplicate_finder;
+        let mut reveal = None;
+        let mut delete_selected = false;
+        let mut rescan = false;
+        let mut close = false;
+
+        egui::Window::new("Duplicate Finder")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(760.0, 590.0))
+            .min_width(640.0)
+            .show(ctx, |ui| {
+                let duplicate_files: usize = groups.iter().map(|group| group.paths.len()).sum();
+                let wasted_bytes: u64 = groups.iter().map(DuplicateGroup::wasted_bytes).sum();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} duplicate group(s)", groups.len()))
+                            .strong()
+                            .color(palette.text_primary),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{duplicate_files} files, {} recoverable",
+                            format_size(wasted_bytes)
+                        ))
+                        .color(palette.text_secondary),
+                    );
+                });
+                if let Some(root) = &root {
+                    settings_path_row(ui, "Scope", root, &palette);
+                }
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(!groups.is_empty(), egui::Button::new("Select Copies"))
+                        .clicked()
+                    {
+                        selected.clear();
+                        for group in &groups {
+                            selected.extend(group.paths.iter().skip(1).cloned());
+                        }
+                    }
+                    if ui
+                        .add_enabled(!selected.is_empty(), egui::Button::new("Clear Selection"))
+                        .clicked()
+                    {
+                        selected.clear();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.power_tools.active_count() == 0,
+                            egui::Button::new("Scan Again"),
+                        )
+                        .clicked()
+                    {
+                        rescan = true;
+                    }
+                });
+                ui.separator();
+
+                if groups.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new("No duplicate file contents were found.")
+                                .color(palette.text_secondary),
+                        );
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (group_index, group) in groups.iter().enumerate() {
+                                let title = format!(
+                                    "Group {} - {} each - {} wasted",
+                                    group_index + 1,
+                                    format_size(group.size_bytes),
+                                    format_size(group.wasted_bytes())
+                                );
+                                egui::CollapsingHeader::new(title)
+                                    .id_salt(("duplicate_group", group_index))
+                                    .default_open(group_index < 3)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "SHA-256 {}...",
+                                                &group.sha256[..12.min(group.sha256.len())]
+                                            ))
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(palette.text_tertiary),
+                                        );
+                                        for path in &group.paths {
+                                            ui.horizontal(|ui| {
+                                                let mut checked = selected.contains(path);
+                                                if ui.checkbox(&mut checked, "").changed() {
+                                                    if checked {
+                                                        selected.insert(path.clone());
+                                                    } else {
+                                                        selected.remove(path);
+                                                    }
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(elide_middle(
+                                                        &path.to_string_lossy(),
+                                                        82,
+                                                    ))
+                                                    .color(palette.text_secondary),
+                                                );
+                                                if ui.small_button("Reveal").clicked() {
+                                                    reveal = Some(path.clone());
+                                                }
+                                            });
+                                        }
+                                    });
+                                ui.separator();
+                            }
+                        });
+                }
+
+                let removes_entire_group = groups.iter().any(|group| {
+                    !group.paths.is_empty()
+                        && group.paths.iter().all(|path| selected.contains(path))
+                });
+                if removes_entire_group {
+                    ui.colored_label(
+                        palette.error,
+                        "Keep at least one file in every duplicate group.",
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !selected.is_empty() && !removes_entire_group,
+                            egui::Button::new(format!(
+                                "Move {} Selected to Recycle Bin",
+                                selected.len()
+                            )),
+                        )
+                        .clicked()
+                    {
+                        delete_selected = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        self.duplicate_selected = selected.clone();
+        if close {
+            open = false;
+        }
+        if let Some(path) = reveal {
+            Self::reveal_in_explorer(&path);
+        }
+        if delete_selected {
+            self.pending_delete = Some(PendingDelete {
+                paths: selected.into_iter().collect(),
+                mode: DeleteMode::Recycle,
+            });
+            open = false;
+        }
+        if rescan {
+            if let Some(root) = root {
+                match self.power_tools.start_duplicate_scan(root) {
+                    Ok(()) => {
+                        self.duplicate_groups.clear();
+                        self.duplicate_selected.clear();
+                        self.show_task_center = true;
+                        open = false;
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+        }
+        self.show_duplicate_finder = open;
+    }
+
+    fn render_folder_sizes_dialog(&mut self, ctx: &egui::Context) {
+        let palette = Palette::for_theme(&self.effective_theme);
+        let entries = self.folder_size_entries.clone();
+        let root = self.folder_size_root.clone();
+        let mut open = self.show_folder_sizes;
+        let mut open_folder = None;
+        let mut recalculate = false;
+        let mut close = false;
+
+        egui::Window::new("Folder Sizes")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(680.0, 540.0))
+            .min_width(560.0)
+            .show(ctx, |ui| {
+                if let Some(root) = &root {
+                    settings_path_row(ui, "Folder", root, &palette);
+                }
+                let total_bytes: u64 = entries.iter().map(|entry| entry.size_bytes).sum();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} child folder(s)", entries.len()))
+                            .strong()
+                            .color(palette.text_primary),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{} total", format_size(total_bytes)))
+                            .color(palette.text_secondary),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("folder_size_results")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing(egui::vec2(14.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.strong("Folder");
+                                ui.strong("Files");
+                                ui.strong("Size");
+                                ui.label("");
+                                ui.end_row();
+                                for entry in &entries {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            entry
+                                                .path
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy(),
+                                        )
+                                        .color(palette.text_primary),
+                                    );
+                                    ui.label(entry.file_count.to_string());
+                                    ui.label(format_size(entry.size_bytes));
+                                    if ui.small_button("Open").clicked() {
+                                        open_folder = Some(entry.path.clone());
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.power_tools.active_count() == 0,
+                            egui::Button::new("Recalculate"),
+                        )
+                        .clicked()
+                    {
+                        recalculate = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if close {
+            open = false;
+        }
+        if let Some(path) = open_folder {
+            self.navigate_to(path);
+            open = false;
+        }
+        if recalculate {
+            if let Some(root) = root {
+                match self.power_tools.start_folder_sizes(root) {
+                    Ok(()) => {
+                        self.folder_size_entries.clear();
+                        self.show_task_center = true;
+                        open = false;
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+        }
+        self.show_folder_sizes = open;
     }
 
     fn render_initial_state(&mut self, ui: &mut egui::Ui) {

@@ -8,6 +8,7 @@ mod index;
 mod model;
 mod navigation;
 mod operations;
+mod power_tools;
 mod scanner;
 mod search;
 mod selection;
@@ -17,6 +18,10 @@ mod storage;
 mod tasks;
 mod thumbs;
 mod undo;
+#[allow(dead_code)]
+mod update_transaction;
+mod updater;
+mod version;
 mod windows_shell;
 
 use eframe::egui;

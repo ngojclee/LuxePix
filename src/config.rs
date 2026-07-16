@@ -9,9 +9,13 @@ use crate::commands::CommandId;
 use crate::model::{SortDirection, SortField, ViewMode};
 use crate::storage::{transactional_write, StoragePaths};
 
-const CURRENT_SCHEMA_VERSION: u32 = 7;
+const CURRENT_SCHEMA_VERSION: u32 = 8;
 const MAX_HISTORY: usize = 50;
 const SHORTCUT_PROFILE_VERSION: u32 = 1;
+pub const DEFAULT_THUMBNAIL_MEMORY_BUDGET_MB: usize = 256;
+pub const MIN_THUMBNAIL_MEMORY_BUDGET_MB: usize = 64;
+pub const MAX_THUMBNAIL_MEMORY_BUDGET_MB: usize = 2_048;
+const MEBIBYTE: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,6 +25,7 @@ pub struct AppConfig {
     pub left_thumb_size: f32,
     pub right_thumb_size: f32,
     pub left_panel_width: f32,
+    pub thumbnail_memory_budget_mb: usize,
     pub last_path: Option<String>,
     pub theme: String,
     pub shortcuts: ShortcutConfig,
@@ -253,6 +258,7 @@ impl Default for AppConfig {
             left_thumb_size: 160.0,
             right_thumb_size: 180.0,
             left_panel_width: 420.0,
+            thumbnail_memory_budget_mb: DEFAULT_THUMBNAIL_MEMORY_BUDGET_MB,
             last_path: None,
             theme: "system".into(),
             shortcuts: ShortcutConfig::default(),
@@ -379,6 +385,10 @@ impl AppConfig {
         }
     }
 
+    pub fn thumbnail_memory_budget_bytes(&self) -> usize {
+        self.thumbnail_memory_budget_mb.saturating_mul(MEBIBYTE)
+    }
+
     pub fn export_shortcut_profile(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(&ShortcutProfile {
             schema_version: SHORTCUT_PROFILE_VERSION,
@@ -407,6 +417,10 @@ impl AppConfig {
         self.left_thumb_size = self.left_thumb_size.clamp(80.0, 500.0);
         self.right_thumb_size = self.right_thumb_size.clamp(80.0, 500.0);
         self.left_panel_width = self.left_panel_width.clamp(280.0, 760.0);
+        self.thumbnail_memory_budget_mb = self.thumbnail_memory_budget_mb.clamp(
+            MIN_THUMBNAIL_MEMORY_BUDGET_MB,
+            MAX_THUMBNAIL_MEMORY_BUDGET_MB,
+        );
         if !matches!(self.theme.as_str(), "light" | "dark" | "system") {
             self.theme = "system".into();
         }
@@ -641,9 +655,13 @@ mod tests {
 
         let loaded = AppConfig::load(&paths);
 
-        assert_eq!(loaded.schema_version, 7);
+        assert_eq!(loaded.schema_version, 8);
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.similarity_result_count, 50);
+        assert_eq!(
+            loaded.thumbnail_memory_budget_mb,
+            super::DEFAULT_THUMBNAIL_MEMORY_BUDGET_MB
+        );
         assert_eq!(loaded.sources.len(), 1);
         assert_eq!(loaded.sources[0].name, "Products");
         assert_eq!(loaded.sources[0].path, "N:/Products");

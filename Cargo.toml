@@ -1,12 +1,15 @@
 [package]
 name = "luxepix"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
-# full version 1.0.0.0 tracked here (Rust semver only supports x.y.z)
 
 [[bin]]
 name = "luxepix"
 path = "src/main.rs"
+
+[[bin]]
+name = "LuxePixUpdater"
+path = "src/bin/luxepix_updater.rs"
 
 [dependencies]
 eframe = "0.29"
@@ -17,12 +20,16 @@ rfd = "0.14"
 natord = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 sha2 = "0.10"
+ureq = { version = "2.12.1", default-features = false, features = ["json", "tls"] }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
 ] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
