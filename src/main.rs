@@ -11,6 +11,7 @@ mod operations;
 mod scanner;
 mod search;
 mod selection;
+mod similarity;
 mod sorting;
 mod storage;
 mod tasks;

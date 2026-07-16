@@ -17,6 +17,10 @@ use crate::operations::{
 use crate::scanner::{format_size, ScanOptions};
 use crate::search::{ProductSearchResult, SearchManager, SearchResponse, SearchScope};
 use crate::selection::SelectionModel;
+use crate::similarity::{
+    ModelPack, SimilarityEngine, SimilarityManager, SimilarityQuery, SimilarityResponse,
+    SimilarityResult,
+};
 use crate::sorting::{sort_files, sort_folders};
 use crate::storage::{transactional_write, StoragePaths};
 use crate::tasks::{TaskEvent, TaskId, TaskKind, TaskManager};
@@ -27,6 +31,7 @@ use crate::windows_shell;
 mod details;
 mod explorer;
 mod first_run;
+mod image_search;
 mod quick_find;
 mod sidebar;
 
@@ -105,6 +110,7 @@ pub struct LuxePixApp {
     undo: UndoManager,
     index: IndexManager,
     search: SearchManager,
+    similarity: SimilarityManager,
 
     // Rename state
     renaming: Option<RenameState>,
@@ -140,6 +146,14 @@ pub struct LuxePixApp {
     quick_find_source_anchor: Option<String>,
     pending_index_rebuild: bool,
     pending_index_reconcile: bool,
+    show_image_search: bool,
+    similarity_query_label: String,
+    similarity_query_path: Option<PathBuf>,
+    similarity_last_query: Option<SimilarityQuery>,
+    similarity_results: SimilarityResponse,
+    similarity_selected: usize,
+    similarity_running: bool,
+    model_pack_status: String,
 
     status: String,
 }
@@ -241,7 +255,20 @@ impl LuxePixApp {
         let config = AppConfig::load(&storage);
         let database_path = storage.index_dir.join("luxepix.db");
         let index = IndexManager::new(database_path.clone(), config.indexing_enabled);
-        let search = SearchManager::new(crate::search::SearchEngine::new(database_path));
+        let search = SearchManager::new(crate::search::SearchEngine::new(database_path.clone()));
+        let mut similarity_engine = SimilarityEngine::new(database_path);
+        let model_pack_result = ModelPack::discover(
+            &storage.executable_dir,
+            &storage.similarity_dir,
+            (!config.model_pack_path.is_empty()).then(|| Path::new(&config.model_pack_path)),
+        );
+        let model_pack_status = match &model_pack_result {
+            Ok(Some(pack)) => format!("Ready - {}", pack.manifest.pack_version),
+            Ok(None) => "Not installed - using local pHash".into(),
+            Err(error) => format!("Invalid - {error}"),
+        };
+        similarity_engine.set_model_pack(model_pack_result.ok().flatten());
+        let similarity = SimilarityManager::new(similarity_engine, storage.similarity_dir.clone());
         let effective_theme = apply_theme(&cc.egui_ctx, &config.theme).to_string();
         let shortcut_draft = config.shortcuts.clone();
         let first_run_source = config
@@ -289,6 +316,7 @@ impl LuxePixApp {
             undo: UndoManager::default(),
             index,
             search,
+            similarity,
             renaming: None,
             storage,
             config,
@@ -320,6 +348,14 @@ impl LuxePixApp {
             quick_find_source_anchor: None,
             pending_index_rebuild: false,
             pending_index_reconcile: false,
+            show_image_search: false,
+            similarity_query_label: String::new(),
+            similarity_query_path: None,
+            similarity_last_query: None,
+            similarity_results: SimilarityResponse::default(),
+            similarity_selected: 0,
+            similarity_running: false,
+            model_pack_status,
             status: "Ready. Pick a folder above or choose a recent path.".into(),
         };
 
@@ -674,6 +710,9 @@ impl LuxePixApp {
                     if !self.quick_find_query.trim().is_empty() {
                         self.queue_quick_find_search();
                     }
+                    if self.similarity_last_query.is_some() {
+                        self.rerun_similarity_query();
+                    }
                 }
                 IndexEvent::Completed {
                     cancelled: true, ..
@@ -761,6 +800,134 @@ impl LuxePixApp {
         }
     }
 
+    fn refresh_model_pack(&mut self) {
+        let custom_path = (!self.config.model_pack_path.is_empty())
+            .then(|| Path::new(&self.config.model_pack_path));
+        match ModelPack::discover(
+            &self.storage.executable_dir,
+            &self.storage.similarity_dir,
+            custom_path,
+        ) {
+            Ok(Some(pack)) => {
+                self.model_pack_status = format!(
+                    "Ready - {} ({})",
+                    pack.manifest.pack_version,
+                    pack.root.display()
+                );
+                self.similarity.set_model_pack(Some(pack));
+            }
+            Ok(None) => {
+                self.model_pack_status = "Not installed - using local pHash".into();
+                self.similarity.set_model_pack(None);
+            }
+            Err(error) => {
+                self.model_pack_status = format!("Invalid - {error}");
+                self.similarity.set_model_pack(None);
+            }
+        }
+    }
+
+    fn start_similarity_query(&mut self, query: SimilarityQuery, preview_path: Option<PathBuf>) {
+        if !self.config.indexing_enabled {
+            self.status = "Enable Search & Index before finding products by image.".into();
+            return;
+        }
+        let label = match &query {
+            SimilarityQuery::Path(path) => path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            SimilarityQuery::Image { label, .. } => label.clone(),
+        };
+        self.similarity_query_label = label;
+        self.similarity_query_path = preview_path;
+        self.similarity_results = SimilarityResponse::default();
+        self.similarity_selected = 0;
+        self.similarity_running = true;
+        self.similarity_last_query = Some(query.clone());
+        self.similarity
+            .submit(query, self.config.similarity_result_count);
+        self.status = "Comparing the query image with the local product index...".into();
+    }
+
+    fn start_similarity_path(&mut self, path: PathBuf) {
+        if !crate::scanner::is_image_file(&path) {
+            self.status = format!("Choose a supported image file: {}", path.display());
+            return;
+        }
+        self.start_similarity_query(SimilarityQuery::Path(path.clone()), Some(path));
+    }
+
+    fn pick_similarity_image(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(
+                "Images",
+                &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"],
+            )
+            .pick_file()
+        else {
+            return;
+        };
+        self.start_similarity_path(path);
+    }
+
+    fn paste_similarity_image(&mut self) {
+        if let Ok(Some(payload)) = windows_shell::read_file_clipboard() {
+            if let Some(path) = payload
+                .paths
+                .into_iter()
+                .find(|path| crate::scanner::is_image_file(path))
+            {
+                self.start_similarity_path(path);
+                return;
+            }
+        }
+        match crate::similarity::clipboard_image() {
+            Ok(image) => self.start_similarity_query(
+                SimilarityQuery::Image {
+                    image,
+                    label: "Clipboard image".into(),
+                },
+                None,
+            ),
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn rerun_similarity_query(&mut self) {
+        let Some(query) = self.similarity_last_query.clone() else {
+            return;
+        };
+        let preview_path = self.similarity_query_path.clone();
+        self.start_similarity_query(query, preview_path);
+    }
+
+    fn process_similarity_events(&mut self) {
+        for completion in self.similarity.drain_latest(4) {
+            self.similarity_running = false;
+            match completion.result {
+                Ok(results) => {
+                    let count = results.results.len();
+                    self.similarity_results = results;
+                    self.similarity_selected = 0;
+                    self.status = if count == 0 {
+                        "No perceptual hashes are available yet. Rebuild the product index.".into()
+                    } else {
+                        format!(
+                            "Found {count} similar product(s) for {}.",
+                            completion.query_label
+                        )
+                    };
+                }
+                Err(error) => {
+                    self.similarity_results = SimilarityResponse::default();
+                    self.status = format!("Image Search failed: {error}");
+                }
+            }
+        }
+    }
+
     fn queue_quick_find_search(&mut self) {
         self.quick_find_dirty_since = Some(std::time::Instant::now());
         self.quick_find_running = !self.quick_find_query.trim().is_empty();
@@ -822,7 +989,14 @@ impl LuxePixApp {
     }
 
     fn reveal_search_result(&mut self, result: &ProductSearchResult) {
-        let folder_path = result.folder_path.clone();
+        self.reveal_product_folder(result.folder_path.clone());
+    }
+
+    fn reveal_similarity_result(&mut self, result: &SimilarityResult) {
+        self.reveal_product_folder(result.folder_path.clone());
+    }
+
+    fn reveal_product_folder(&mut self, folder_path: PathBuf) {
         let Some(parent) = folder_path.parent().map(Path::to_path_buf) else {
             return;
         };
@@ -1189,6 +1363,9 @@ impl LuxePixApp {
                 self.quick_find_focus_requested = true;
                 self.queue_quick_find_search();
             }
+            CommandId::FindSimilar => {
+                self.show_image_search = true;
+            }
         }
     }
 
@@ -1364,6 +1541,18 @@ impl LuxePixApp {
             return hovered_count;
         }
 
+        if self.show_image_search {
+            if let Some(path) = dropped_paths
+                .into_iter()
+                .find(|path| crate::scanner::is_image_file(path))
+            {
+                self.start_similarity_path(path);
+            } else {
+                self.status = "Drop a supported image file into Image Search.".into();
+            }
+            return 0;
+        }
+
         let Some(target_dir) = self.active_target_dir() else {
             self.status = "Choose a destination folder before dropping files.".into();
             return 0;
@@ -1377,6 +1566,19 @@ impl LuxePixApp {
         let Some(pointer) = ctx.pointer_hover_pos() else {
             return;
         };
+        if self.show_image_search && external_hover_count > 0 && self.internal_drag.is_none() {
+            egui::Area::new(egui::Id::new("image_search_drop_indicator"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pointer + egui::vec2(16.0, 18.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new("Search with this image").strong());
+                        ui.label(egui::RichText::new("Processed locally").size(11.5));
+                    });
+                });
+            return;
+        }
         let (mode, count, target) = if let Some(drag) = &self.internal_drag {
             (
                 drag.mode,
@@ -1582,6 +1784,7 @@ impl LuxePixApp {
             || self.preview.is_some()
             || self.renaming.is_some()
             || self.show_settings
+            || self.show_image_search
             || self.pending_paste.is_some()
             || self.pending_delete.is_some()
             || !self.config.first_run_complete
@@ -1602,6 +1805,7 @@ impl LuxePixApp {
         if self.preview.is_some()
             || self.renaming.is_some()
             || self.show_settings
+            || self.show_image_search
             || !self.config.first_run_complete
             || ctx.wants_keyboard_input()
         {
@@ -1688,6 +1892,7 @@ impl eframe::App for LuxePixApp {
         self.maintain_index();
         self.submit_quick_find_if_ready();
         self.process_search_events();
+        self.process_similarity_events();
 
         // Process thumbnail results
         let loaded_thumbs = self.thumb_mgr.process_results(ctx);
@@ -1821,6 +2026,10 @@ impl eframe::App for LuxePixApp {
             self.render_quick_find_window(ctx);
         }
 
+        if self.show_image_search {
+            self.render_image_search_window(ctx);
+        }
+
         if self.pending_delete.is_some() {
             self.render_delete_confirmation(ctx);
         }
@@ -1850,6 +2059,7 @@ impl eframe::App for LuxePixApp {
             || self.index.is_active()
             || self.quick_find_running
             || self.quick_find_dirty_since.is_some()
+            || self.similarity_running
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -2066,6 +2276,19 @@ impl LuxePixApp {
             .clicked()
             {
                 self.execute_command(CommandId::Find);
+            }
+
+            if icon_button(
+                ui,
+                IconKind::Image,
+                None,
+                "Find Product by Image (Ctrl+Shift+F)",
+                self.show_image_search,
+                &palette,
+            )
+            .clicked()
+            {
+                self.execute_command(CommandId::FindSimilar);
             }
 
             if icon_button(
@@ -2364,6 +2587,9 @@ impl LuxePixApp {
         let mut pause_index = false;
         let mut resume_index = false;
         let mut cancel_index = false;
+        let mut choose_model_pack = false;
+        let mut clear_model_pack = false;
+        let mut refresh_model_pack = false;
         let mut close_window = false;
         let index_snapshot = self.index.snapshot().clone();
 
@@ -2677,6 +2903,53 @@ impl LuxePixApp {
                                     )
                                     .changed();
                             });
+                            ui.add_space(14.0);
+                            settings_heading(ui, "AI Model Pack", &palette);
+                            settings_value_row(
+                                ui,
+                                "Status",
+                                &self.model_pack_status,
+                                &palette,
+                            );
+                            if self.config.model_pack_path.is_empty() {
+                                settings_value_row(
+                                    ui,
+                                    "Location",
+                                    "Auto-detect beside LuxePix",
+                                    &palette,
+                                );
+                            } else {
+                                settings_path_row(
+                                    ui,
+                                    "Location",
+                                    Path::new(&self.config.model_pack_path),
+                                    &palette,
+                                );
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Choose Folder").clicked() {
+                                    choose_model_pack = true;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !self.config.model_pack_path.is_empty(),
+                                        egui::Button::new("Use Auto-detect"),
+                                    )
+                                    .clicked()
+                                {
+                                    clear_model_pack = true;
+                                }
+                                if ui.button("Recheck").clicked() {
+                                    refresh_model_pack = true;
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new(
+                                    "Image matching always falls back to local pHash if the optional helper or model is unavailable.",
+                                )
+                                .size(11.5)
+                                .color(palette.text_secondary),
+                            );
                             ui.add_space(12.0);
                             settings_path_row(ui, "Index", &self.storage.index_dir, &palette);
                             settings_path_row(
@@ -2791,11 +3064,27 @@ impl LuxePixApp {
             self.export_shortcut_profile();
         }
 
+        if choose_model_pack {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                self.config.model_pack_path = path.to_string_lossy().to_string();
+                config_changed = true;
+                refresh_model_pack = true;
+            }
+        }
+        if clear_model_pack {
+            self.config.model_pack_path.clear();
+            config_changed = true;
+            refresh_model_pack = true;
+        }
+
         if config_changed {
             self.effective_theme = apply_theme(ctx, &self.config.theme).to_string();
             if let Err(error) = self.config.save() {
                 self.status = format!("Could not save settings: {error}");
             }
+        }
+        if refresh_model_pack {
+            self.refresh_model_pack();
         }
         if hidden_files_changed {
             self.refresh_current_view();

@@ -98,19 +98,22 @@ This checklist follows:
 
 ## E5 - Find Product By Image
 
-- [ ] Accept query image from file picker.
-- [ ] Accept query image from clipboard paste.
-- [ ] Accept query image by drag/drop.
-- [ ] Compute and persist real perceptual hashes.
-- [ ] Rank the best image per product folder.
-- [ ] Show top 10 by default with adjustable 5-50 result count.
-- [ ] Show scores, matched image, source, path, and low-confidence warning.
-- [ ] Add local Model Pack manifest and discovery.
-- [ ] Support a custom local Model Pack path.
+- [x] Accept query image from file picker.
+- [x] Accept query image from clipboard paste.
+- [x] Accept query image by drag/drop.
+- [x] Compute and persist real perceptual hashes.
+- [x] Rank the best image per product folder.
+- [x] Show top 10 by default with adjustable 5-50 result count.
+- [x] Show scores, matched image, source, path, and low-confidence warning.
+- [x] Add local Model Pack manifest and discovery.
+- [x] Support a custom local Model Pack path.
 - [!] Benchmark and select the ONNX CLIP vision model/runtime.
-- [ ] Add a local `LuxePixAI.exe` inference bridge.
-- [ ] Rerank a pHash shortlist with CLIP.
-- [ ] Fall back to pHash when the Model Pack is unavailable or fails.
+- [~] Add a local `LuxePixAI.exe` inference bridge; the validated client
+  protocol, timeout, and failure handling are complete, but the helper binary
+  remains coupled to the ONNX feasibility spike.
+- [~] Rerank a bounded pHash shortlist with CLIP when a validated helper is
+  present; final runtime proof awaits the selected Model Pack.
+- [x] Fall back to pHash when the Model Pack is unavailable or fails.
 
 ## E6 - Update, Installer, Portable, And Releases
 
@@ -144,7 +147,7 @@ This checklist follows:
 - [~] Add unit tests for commands, shortcuts, selection, sorting, extraction, collisions, and versions.
 - [x] Add temp-directory integration tests for file operations and Undo.
 - [x] Add SQLite migration, rebuild, and search tests.
-- [ ] Add pHash grouping and ranking tests.
+- [x] Add pHash grouping and ranking tests.
 - [ ] Add portable updater transaction and rollback tests.
 - [ ] Capture Light/Dark/System screenshots.
 - [ ] Capture stable inline-rename screenshots.
@@ -218,3 +221,16 @@ This checklist follows:
   images, opened Quick Find with Ctrl+F, matched `104`, and selected
   `SKU-1042 Blue Chrome` in place. Native network-share watcher validation
   remains a feasibility item; bounded per-source polling is implemented.
+- 2026-07-16: Completed the E5 local image-search core with a real 32x32 DCT
+  perceptual hash, SQLite schema v2 migration and hash persistence, best-image
+  product grouping, adjustable top 5-50 results, confidence labeling, matched
+  image/source/path details, reveal navigation, and picker/bitmap
+  clipboard/file-drop input.
+- 2026-07-16: Added checksummed Model Pack discovery, a custom local path,
+  bounded `LuxePixAI.exe` JSON bridge protocol with a 15-second timeout, and
+  automatic pHash fallback. ONNX model/runtime selection and the distributable
+  helper remain a feasibility spike rather than being claimed as complete.
+- 2026-07-16: E5 automated gates passed with format, strict Clippy, 57 regular
+  tests including database migration, real hash persistence, product grouping,
+  ranking and Model Pack validation, a locked release build, and a five-second
+  release executable startup smoke test.

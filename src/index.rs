@@ -14,8 +14,9 @@ use crate::scanner::is_image_file;
 use crate::search::{
     extract_product_code, normalize_code, normalize_path_key, validate_extraction_rule,
 };
+use crate::similarity::{PerceptualHash, PHASH_VERSION};
 
-const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
 const PRODUCT_BATCH_SIZE: usize = 100;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -393,6 +394,7 @@ struct ImageRecord {
     size_bytes: u64,
     modified_unix: u64,
     is_preview: bool,
+    perceptual_hash: Option<String>,
 }
 
 fn run_index_job(
@@ -565,12 +567,16 @@ fn inspect_product_folder(path: &Path, source: &SourceConfig) -> Option<ProductR
         let file_size = metadata.as_ref().map(fs::Metadata::len).unwrap_or(0);
         size_bytes = size_bytes.saturating_add(file_size);
         if is_image_file(&file_path) {
+            let perceptual_hash = PerceptualHash::from_path(&file_path)
+                .ok()
+                .map(PerceptualHash::to_database);
             images.push(ImageRecord {
                 normalized_path: normalize_path_key(&file_path),
                 path: file_path,
                 size_bytes: file_size,
                 modified_unix: metadata.as_ref().map(metadata_modified_unix).unwrap_or(0),
                 is_preview: false,
+                perceptual_hash,
             });
         }
     }
@@ -672,7 +678,7 @@ fn write_product(
             "INSERT INTO images (
                  product_id, path, normalized_path, size_bytes, modified_unix,
                  is_preview, perceptual_hash, hash_version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 product_id,
                 image.path.to_string_lossy(),
@@ -680,6 +686,12 @@ fn write_product(
                 image.size_bytes as i64,
                 image.modified_unix as i64,
                 i64::from(image.is_preview),
+                image.perceptual_hash.as_deref(),
+                if image.perceptual_hash.is_some() {
+                    PHASH_VERSION
+                } else {
+                    0
+                },
             ],
         )?;
     }
@@ -849,6 +861,16 @@ fn migrate_database(connection: &Connection) -> rusqlite::Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 2 {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE INDEX IF NOT EXISTS idx_images_hash_version
+                 ON images(hash_version)
+                 WHERE perceptual_hash IS NOT NULL;
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -901,6 +923,8 @@ mod tests {
     use super::{initialize_database, open_database, run_index_job, IndexEvent};
     use crate::config::{ProductCodeMode, SourceConfig};
     use crate::search::{SearchEngine, SearchGroupKind, SearchScope};
+    use crate::similarity::PHASH_VERSION;
+    use image::{Rgb, RgbImage};
     use rusqlite::Connection;
     use std::fs;
     use std::sync::atomic::AtomicBool;
@@ -958,7 +982,7 @@ mod tests {
             )
             .expect("read table count");
 
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         assert_eq!(table_count, 3);
         drop(connection);
         fs::remove_dir_all(root).expect("remove fixture");
@@ -1042,6 +1066,88 @@ mod tests {
         assert!(recovered);
         assert!(database.is_file());
         assert_eq!(backups, 1);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn version_one_database_migrates_for_perceptual_hash_queries() {
+        let root = fixture_root("hash-migration");
+        fs::create_dir_all(&root).expect("create fixture");
+        let database = root.join("luxepix.db");
+        let connection = Connection::open(&database).expect("open database");
+        connection
+            .execute_batch(
+                "CREATE TABLE images (
+                     id INTEGER PRIMARY KEY,
+                     product_id INTEGER NOT NULL,
+                     path TEXT NOT NULL,
+                     normalized_path TEXT NOT NULL,
+                     size_bytes INTEGER NOT NULL DEFAULT 0,
+                     modified_unix INTEGER NOT NULL DEFAULT 0,
+                     is_preview INTEGER NOT NULL DEFAULT 0,
+                     perceptual_hash TEXT,
+                     hash_version INTEGER NOT NULL DEFAULT 0
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .expect("create version one database");
+        drop(connection);
+
+        let connection = open_database(&database).expect("migrate database");
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema version");
+        let index_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_images_hash_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("find hash index");
+
+        assert_eq!(version, 2);
+        assert_eq!(index_count, 1);
+        drop(connection);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn indexing_persists_real_perceptual_hashes_for_valid_images() {
+        let root = fixture_root("image-hashes");
+        let source_root = root.join("Products");
+        let product = source_root.join("1001 Blue");
+        fs::create_dir_all(&product).expect("create product");
+        let mut image = RgbImage::new(80, 80);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = if (x / 10 + y / 8) % 2 == 0 {
+                Rgb([230, 40, 80])
+            } else {
+                Rgb([20, 170, 210])
+            };
+        }
+        image
+            .save(product.join("preview.png"))
+            .expect("save valid image");
+        let database = root.join("index").join("luxepix.db");
+        let source = SourceConfig {
+            path: source_root.to_string_lossy().to_string(),
+            ..SourceConfig::default()
+        };
+
+        run_fixture_index(&database, source, true);
+        let connection = Connection::open(&database).expect("open database");
+        let (hash, version): (Option<String>, i64) = connection
+            .query_row(
+                "SELECT perceptual_hash, hash_version FROM images LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read image hash");
+
+        assert_eq!(hash.as_deref().map(str::len), Some(16));
+        assert_eq!(version, PHASH_VERSION);
+        drop(connection);
         fs::remove_dir_all(root).expect("remove fixture");
     }
 

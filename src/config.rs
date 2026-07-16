@@ -9,7 +9,7 @@ use crate::commands::CommandId;
 use crate::model::{SortDirection, SortField, ViewMode};
 use crate::storage::{transactional_write, StoragePaths};
 
-const CURRENT_SCHEMA_VERSION: u32 = 6;
+const CURRENT_SCHEMA_VERSION: u32 = 7;
 const MAX_HISTORY: usize = 50;
 const SHORTCUT_PROFILE_VERSION: u32 = 1;
 
@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub check_updates_on_startup: bool,
     pub indexing_enabled: bool,
     pub similarity_result_count: usize,
+    pub model_pack_path: String,
     pub sidebar_collapsed: bool,
     pub details_panel_open: bool,
     pub file_view_mode: ViewMode,
@@ -89,6 +90,7 @@ pub struct ShortcutConfig {
     pub undo: String,
     pub refresh: String,
     pub find: String,
+    pub find_similar: String,
     pub back: String,
     pub forward: String,
     pub up: String,
@@ -120,6 +122,7 @@ impl Default for ShortcutConfig {
             undo: CommandId::Undo.default_shortcut().into(),
             refresh: CommandId::Refresh.default_shortcut().into(),
             find: CommandId::Find.default_shortcut().into(),
+            find_similar: CommandId::FindSimilar.default_shortcut().into(),
             back: CommandId::Back.default_shortcut().into(),
             forward: CommandId::Forward.default_shortcut().into(),
             up: CommandId::Up.default_shortcut().into(),
@@ -160,6 +163,7 @@ impl ShortcutConfig {
             CommandId::Undo => &self.undo,
             CommandId::Refresh => &self.refresh,
             CommandId::Find => &self.find,
+            CommandId::FindSimilar => &self.find_similar,
             CommandId::Back => &self.back,
             CommandId::Forward => &self.forward,
             CommandId::Up => &self.up,
@@ -185,6 +189,7 @@ impl ShortcutConfig {
             CommandId::Undo => &mut self.undo,
             CommandId::Refresh => &mut self.refresh,
             CommandId::Find => &mut self.find,
+            CommandId::FindSimilar => &mut self.find_similar,
             CommandId::Back => &mut self.back,
             CommandId::Forward => &mut self.forward,
             CommandId::Up => &mut self.up,
@@ -259,6 +264,7 @@ impl Default for AppConfig {
             check_updates_on_startup: true,
             indexing_enabled: true,
             similarity_result_count: 10,
+            model_pack_path: String::new(),
             sidebar_collapsed: false,
             details_panel_open: true,
             file_view_mode: ViewMode::Gallery,
@@ -405,6 +411,7 @@ impl AppConfig {
             self.theme = "system".into();
         }
         self.similarity_result_count = self.similarity_result_count.clamp(5, 50);
+        self.model_pack_path = self.model_pack_path.trim().to_string();
         self.confirm_permanent_delete = true;
         self.path_history.truncate(MAX_HISTORY);
         for source in &mut self.sources {
@@ -634,7 +641,7 @@ mod tests {
 
         let loaded = AppConfig::load(&paths);
 
-        assert_eq!(loaded.schema_version, 6);
+        assert_eq!(loaded.schema_version, 7);
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.similarity_result_count, 50);
         assert_eq!(loaded.sources.len(), 1);

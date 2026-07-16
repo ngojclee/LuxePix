@@ -20,4 +20,8 @@
 - [x] Build release (6.55 MB single .exe)
 
 ## Pending
-- [ ] Initialize git repo and push to GitHub
+- [x] Initialize the local Git repository and build E0-E4 checkpoints.
+- [x] Add local product-code Quick Find with SQLite indexing.
+- [x] Add pHash-based Find Product by Image with local-only inputs and fallback.
+- [ ] Complete updater, installer, portable packaging, and GitHub release.
+- [ ] Complete power tools and final Windows acceptance evidence.

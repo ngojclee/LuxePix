@@ -30,6 +30,7 @@ pub enum CommandId {
     Undo,
     Refresh,
     Find,
+    FindSimilar,
     Back,
     Forward,
     Up,
@@ -41,7 +42,7 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const CONFIGURABLE: [Self; 20] = [
+    pub const CONFIGURABLE: [Self; 21] = [
         Self::Copy,
         Self::Cut,
         Self::Paste,
@@ -54,6 +55,7 @@ impl CommandId {
         Self::Undo,
         Self::Refresh,
         Self::Find,
+        Self::FindSimilar,
         Self::Back,
         Self::Forward,
         Self::Up,
@@ -64,10 +66,11 @@ impl CommandId {
         Self::EditAddress,
     ];
 
-    pub const ACTIVE: [Self; 20] = [
+    pub const ACTIVE: [Self; 21] = [
         Self::Settings,
         Self::EditAddress,
         Self::Find,
+        Self::FindSimilar,
         Self::Back,
         Self::Forward,
         Self::Up,
@@ -101,6 +104,7 @@ impl CommandId {
             Self::Undo => "Undo",
             Self::Refresh => "Refresh",
             Self::Find => "Quick Find",
+            Self::FindSimilar => "Find Product by Image",
             Self::Back => "Back",
             Self::Forward => "Forward",
             Self::Up => "Up",
@@ -117,6 +121,7 @@ impl CommandId {
             Self::Delete => "Delete",
             Self::DeletePermanent => "Delete Permanently",
             Self::Find => "Find",
+            Self::FindSimilar => "Image Search",
             Self::Preview => "Preview",
             Self::RevealInExplorer => "Reveal in Explorer",
             Self::EditAddress => "Address Bar",
@@ -138,6 +143,7 @@ impl CommandId {
             Self::Undo => "Ctrl+Z",
             Self::Refresh => "F5",
             Self::Find => "Ctrl+F",
+            Self::FindSimilar => "Ctrl+Shift+F",
             Self::Back => "Alt+Left",
             Self::Forward => "Alt+Right",
             Self::Up => "Alt+Up",
@@ -163,7 +169,7 @@ impl CommandId {
             Self::Forward => context.can_navigate_forward,
             Self::Up => context.can_navigate_up,
             Self::Preview => context.has_previewable_selection,
-            Self::Find | Self::Settings | Self::EditAddress => true,
+            Self::Find | Self::FindSimilar | Self::Settings | Self::EditAddress => true,
         }
     }
 }
