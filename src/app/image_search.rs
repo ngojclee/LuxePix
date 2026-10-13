@@ -22,7 +22,7 @@ impl LuxePixApp {
             .collapsible(false)
             .resizable(true)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 68.0))
-            .default_size(egui::vec2(720.0, 650.0))
+            .default_size(fit_window_size(ctx, 720.0, 650.0))
             .min_width(580.0)
             .min_height(430.0)
             .show(ctx, |ui| {

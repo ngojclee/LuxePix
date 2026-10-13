@@ -2950,7 +2950,7 @@ impl LuxePixApp {
             .open(&mut open)
             .resizable(true)
             .collapsible(false)
-            .default_size(egui::vec2(660.0, 520.0))
+            .default_size(fit_window_size(ctx, 660.0, 520.0))
             .min_width(560.0)
             .min_height(440.0)
             .show(ctx, |ui| {
@@ -3849,7 +3849,7 @@ impl LuxePixApp {
             .open(&mut open)
             .resizable(true)
             .collapsible(false)
-            .default_size(egui::vec2(620.0, 420.0))
+            .default_size(fit_window_size(ctx, 620.0, 420.0))
             .min_width(500.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -4210,7 +4210,7 @@ impl LuxePixApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size(egui::vec2(560.0, 390.0))
+            .default_size(fit_window_size(ctx, 560.0, 390.0))
             .min_width(480.0)
             .show(ctx, |ui| match &state {
                 UpdateState::Available(offer) => {
@@ -4404,7 +4404,7 @@ impl LuxePixApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size(egui::vec2(720.0, 560.0))
+            .default_size(fit_window_size(ctx, 720.0, 560.0))
             .min_width(620.0)
             .show(ctx, |ui| {
                 settings_heading(ui, "Rename Rules", &palette);
@@ -4570,7 +4570,7 @@ impl LuxePixApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size(egui::vec2(760.0, 590.0))
+            .default_size(fit_window_size(ctx, 760.0, 590.0))
             .min_width(640.0)
             .show(ctx, |ui| {
                 let duplicate_files: usize = groups.iter().map(|group| group.paths.len()).sum();
@@ -4753,7 +4753,7 @@ impl LuxePixApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size(egui::vec2(680.0, 540.0))
+            .default_size(fit_window_size(ctx, 680.0, 540.0))
             .min_width(560.0)
             .show(ctx, |ui| {
                 if let Some(root) = &root {
@@ -4847,7 +4847,9 @@ impl LuxePixApp {
 
     fn render_initial_state(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_theme(&self.effective_theme);
-        ui.centered_and_justified(|ui| {
+        let content_height = 96.0 + 22.0 + 21.0 + 6.0 + 18.0 + 18.0 + 30.0;
+        ui.add_space(((ui.available_height() - content_height) * 0.45).max(0.0));
+        ui.vertical(|ui| {
             ui.vertical_centered(|ui| {
                 let art = ui.allocate_exact_size(egui::vec2(96.0, 96.0), egui::Sense::hover()).0;
                 paint_brand_icon(ui, &mut self.brand_icon, art);
@@ -4872,7 +4874,9 @@ impl LuxePixApp {
 
     fn render_select_folder_state(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_theme(&self.effective_theme);
-        ui.centered_and_justified(|ui| {
+        let content_height = 76.0 + 16.0 + 20.0 + 6.0 + 18.0;
+        ui.add_space(((ui.available_height() - content_height) * 0.45).max(0.0));
+        ui.vertical(|ui| {
             ui.vertical_centered(|ui| {
                 let art = ui
                     .allocate_exact_size(egui::vec2(76.0, 76.0), egui::Sense::hover())
@@ -5978,6 +5982,14 @@ enum IconKind {
     Info,
     Edit,
     Search,
+}
+
+fn fit_window_size(ctx: &egui::Context, width: f32, height: f32) -> egui::Vec2 {
+    let screen = ctx.screen_rect().size();
+    egui::vec2(
+        width.min((screen.x - 48.0).max(420.0)),
+        height.min((screen.y - 120.0).max(320.0)),
+    )
 }
 
 fn paint_brand_icon(
