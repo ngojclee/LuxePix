@@ -180,6 +180,8 @@ pub struct LuxePixApp {
     folder_size_root: Option<PathBuf>,
     folder_size_entries: Vec<FolderSizeEntry>,
 
+    brand_icon: Option<egui::TextureHandle>,
+
     status: String,
 }
 
@@ -404,6 +406,7 @@ impl LuxePixApp {
             show_folder_sizes: false,
             folder_size_root: None,
             folder_size_entries: Vec::new(),
+            brand_icon: None,
             status: startup_handshake_error
                 .unwrap_or_else(|| "Ready. Pick a folder above or choose a recent path.".into()),
         };
@@ -2270,7 +2273,7 @@ impl eframe::App for LuxePixApp {
                 egui::Frame::none()
                     .fill(palette.surface)
                     .stroke(egui::Stroke::new(1.0, palette.border_soft))
-                    .inner_margin(egui::Margin::symmetric(10.0, 12.0)),
+                    .inner_margin(egui::Margin::symmetric(12.0, 14.0)),
             )
             .show(ctx, |ui| {
                 self.render_navigation_sidebar(ui, compact_sidebar);
@@ -2312,7 +2315,7 @@ impl eframe::App for LuxePixApp {
                     egui::Frame::none()
                         .fill(palette.surface)
                         .stroke(egui::Stroke::new(1.0, palette.border_soft))
-                        .inner_margin(egui::Margin::symmetric(14.0, 12.0)),
+                        .inner_margin(egui::Margin::symmetric(16.0, 14.0)),
                 )
                 .show(ctx, |ui| {
                     self.render_details_panel(ui);
@@ -2426,16 +2429,9 @@ impl LuxePixApp {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
 
             let mark_rect = ui
-                .allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover())
+                .allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover())
                 .0;
-            ui.painter().rect_filled(mark_rect, 7.0, palette.accent);
-            draw_icon(
-                ui.painter(),
-                IconKind::Image,
-                mark_rect.shrink(6.0),
-                egui::Color32::WHITE,
-                1.6,
-            );
+            paint_brand_icon(ui, &mut self.brand_icon, mark_rect);
             ui.label(
                 egui::RichText::new("LuxePix")
                     .size(14.0)
@@ -2784,7 +2780,7 @@ impl LuxePixApp {
                                     .show(ui, |ui| {
                                         for path_str in self.config.path_history.iter() {
                                             let (rect, resp) = ui.allocate_exact_size(
-                                                egui::vec2(ui.available_width(), 38.0),
+                                                egui::vec2(ui.available_width(), 40.0),
                                                 egui::Sense::click(),
                                             );
                                             if resp.hovered() {
@@ -2795,7 +2791,7 @@ impl LuxePixApp {
                                                 );
                                             }
                                             let icon_rect = egui::Rect::from_min_size(
-                                                rect.min + egui::vec2(14.0, 11.0),
+                                                rect.min + egui::vec2(14.0, 13.0),
                                                 egui::vec2(14.0, 14.0),
                                             );
                                             draw_icon(
@@ -2954,9 +2950,9 @@ impl LuxePixApp {
             .open(&mut open)
             .resizable(true)
             .collapsible(false)
-            .default_size(egui::vec2(760.0, 570.0))
-            .min_width(680.0)
-            .min_height(480.0)
+            .default_size(egui::vec2(660.0, 520.0))
+            .min_width(560.0)
+            .min_height(440.0)
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -3433,10 +3429,23 @@ impl LuxePixApp {
                                 &self.storage.updates_dir,
                                 &palette,
                             );
+                            settings_path_row(
+                                ui,
+                                "Install folder",
+                                &self.storage.executable_dir,
+                                &palette,
+                            );
                             ui.add_space(12.0);
-                            if ui.button("Open Data Folder").clicked() {
-                                Self::open_file_external(&self.storage.root);
-                            }
+                            ui.horizontal(|ui| {
+                                if ui.button("Open Data Folder").clicked() {
+                                    Self::open_file_external(&self.storage.root);
+                                }
+                                if self.storage.mode == crate::storage::StorageMode::Installed
+                                    && ui.button("Open Install Folder").clicked()
+                                {
+                                    Self::open_file_external(&self.storage.executable_dir);
+                                }
+                            });
                         }
                     });
 
@@ -4841,9 +4850,7 @@ impl LuxePixApp {
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
                 let art = ui.allocate_exact_size(egui::vec2(96.0, 96.0), egui::Sense::hover()).0;
-                ui.painter().rect_filled(art, 18.0, palette.surface_inset);
-                ui.painter().rect_stroke(art, 18.0, egui::Stroke::new(1.0, palette.border_soft));
-                draw_icon(ui.painter(), IconKind::HardDrive, art.shrink(28.0), palette.text_tertiary, 1.7);
+                paint_brand_icon(ui, &mut self.brand_icon, art);
                 ui.add_space(22.0);
                 ui.label(egui::RichText::new("Pick a folder to start browsing").size(16.0).strong().color(palette.text_primary));
                 ui.add_space(6.0);
@@ -4908,7 +4915,7 @@ impl LuxePixApp {
 
         egui::Frame::none()
             .fill(palette.canvas)
-            .inner_margin(egui::Margin::symmetric(18.0, 8.0))
+            .inner_margin(egui::Margin::symmetric(18.0, 10.0))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let selected_label = match self.file_selection.len() {
@@ -5020,7 +5027,7 @@ impl LuxePixApp {
                     for folder in &folders {
                         let tile_w = tile_width;
                         let thumb_h = (tile_w * 0.75).max(86.0);
-                        let tile_h = thumb_h + 58.0;
+                        let tile_h = thumb_h + 70.0;
                         let (rect, tile_resp) = ui.allocate_exact_size(
                             egui::vec2(tile_w, tile_h),
                             egui::Sense::click_and_drag(),
@@ -5159,8 +5166,8 @@ impl LuxePixApp {
                         });
 
                         let name_rect = egui::Rect::from_min_size(
-                            egui::pos2(rect.min.x + 10.0, rect.min.y + thumb_h + 8.0),
-                            egui::vec2(tile_w - 20.0, 22.0),
+                            egui::pos2(rect.min.x + 10.0, rect.min.y + thumb_h + 6.0),
+                            egui::vec2(tile_w - 20.0, 34.0),
                         );
                         let is_renaming_this = renaming_path.as_ref() == Some(&folder.path);
 
@@ -5182,12 +5189,15 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            ui.painter().text(
-                                name_rect.left_center(),
-                                egui::Align2::LEFT_CENTER,
-                                truncate_str(&folder.name, 28),
-                                egui::FontId::proportional(13.0),
-                                palette.text_primary,
+                            ui.put(
+                                name_rect,
+                                egui::Label::new(
+                                    egui::RichText::new(&folder.name)
+                                        .size(13.0)
+                                        .color(palette.text_primary),
+                                )
+                                .wrap()
+                                .truncate(),
                             );
                         }
 
@@ -5346,7 +5356,7 @@ impl LuxePixApp {
 
                     for file in &files {
                         let tile_w = tile_width;
-                        let info_h = 48.0;
+                        let info_h = 62.0;
                         let tile_h = tile_w + info_h;
                         let (rect, tile_resp) = ui.allocate_exact_size(
                             egui::vec2(tile_w, tile_h),
@@ -5479,8 +5489,8 @@ impl LuxePixApp {
                         });
 
                         let name_rect = egui::Rect::from_min_size(
-                            egui::pos2(rect.min.x + 10.0, rect.min.y + tile_w + 7.0),
-                            egui::vec2(tile_w - 20.0, 21.0),
+                            egui::pos2(rect.min.x + 10.0, rect.min.y + tile_w + 6.0),
+                            egui::vec2(tile_w - 20.0, 32.0),
                         );
                         let is_renaming_this = renaming_path.as_ref() == Some(&file.path);
 
@@ -5502,12 +5512,15 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            ui.painter().text(
-                                name_rect.left_center(),
-                                egui::Align2::LEFT_CENTER,
-                                truncate_str(&file.name, 30),
-                                egui::FontId::proportional(12.5),
-                                palette.text_primary,
+                            ui.put(
+                                name_rect,
+                                egui::Label::new(
+                                    egui::RichText::new(&file.name)
+                                        .size(12.5)
+                                        .color(palette.text_primary),
+                                )
+                                .wrap()
+                                .truncate(),
                             );
                         }
 
@@ -5957,7 +5970,6 @@ enum IconKind {
     ChevronLeft,
     ChevronRight,
     ChevronUp,
-    HardDrive,
     Loader,
     Doc,
     Video,
@@ -5966,6 +5978,33 @@ enum IconKind {
     Info,
     Edit,
     Search,
+}
+
+fn paint_brand_icon(
+    ui: &egui::Ui,
+    slot: &mut Option<egui::TextureHandle>,
+    rect: egui::Rect,
+) {
+    let texture = slot.get_or_insert_with(|| {
+        let icon_image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            .expect("LuxePix brand icon must be a readable PNG")
+            .to_rgba8();
+        let (width, height) = icon_image.dimensions();
+        ui.ctx().load_texture(
+            "luxepix-brand",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [width as usize, height as usize],
+                icon_image.as_raw(),
+            ),
+            egui::TextureOptions::LINEAR,
+        )
+    });
+    ui.painter().image(
+        texture.id(),
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
@@ -6010,8 +6049,10 @@ fn apply_theme(ctx: &egui::Context, preference: &str) -> &'static str {
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.window_margin = egui::Margin::same(12.0);
+    style.spacing.menu_margin = egui::Margin::same(8.0);
     style.visuals = ctx.style().visuals.clone();
     ctx.set_style(style);
     theme
@@ -6638,14 +6679,6 @@ fn draw_icon(
                 stroke,
             ));
         }
-        IconKind::HardDrive => {
-            painter.rect_stroke(r(3.0, 13.0, 21.0, 19.0), 2.0, stroke);
-            painter.add(egui::Shape::line(
-                vec![p(6.0, 13.0), p(8.0, 6.0), p(16.0, 6.0), p(18.0, 13.0)],
-                stroke,
-            ));
-            painter.circle_filled(p(7.5, 16.0), rect.width() * 0.8 / 24.0, color);
-        }
         IconKind::Loader => {
             painter.circle_stroke(
                 p(12.0, 12.0),
@@ -6793,7 +6826,7 @@ fn settings_heading(ui: &mut egui::Ui, title: &str, palette: &Palette) {
 
 fn settings_value_row(ui: &mut egui::Ui, label: &str, value: &str, palette: &Palette) {
     ui.horizontal(|ui| {
-        ui.add_sized([130.0, 22.0], egui::Label::new(label));
+        ui.add_sized([136.0, 24.0], egui::Label::new(label));
         ui.label(
             egui::RichText::new(value)
                 .monospace()

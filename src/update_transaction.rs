@@ -403,6 +403,16 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 #[cfg(windows)]
+pub fn wait_for_process_exit_pub(pid: u32, timeout: Duration) -> Result<(), String> {
+    wait_for_process_exit(pid, timeout)
+}
+
+#[cfg(not(windows))]
+pub fn wait_for_process_exit_pub(_pid: u32, _timeout: Duration) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
 fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<(), String> {
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::System::Threading::{

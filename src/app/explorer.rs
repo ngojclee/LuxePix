@@ -26,10 +26,10 @@ impl LuxePixApp {
         egui::Frame::none()
             .fill(palette.surface)
             .stroke(egui::Stroke::new(1.0, palette.border_soft))
-            .inner_margin(egui::Margin::symmetric(14.0, 7.0))
+            .inner_margin(egui::Margin::symmetric(14.0, 9.0))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     for mode in ViewMode::ALL {
                         view_changed |= ui
                             .selectable_value(&mut self.config.file_view_mode, mode, mode.label())
@@ -198,7 +198,7 @@ impl LuxePixApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
                     for file in &files {
-                        let tile_height = tile_width + 44.0;
+                        let tile_height = tile_width + 56.0;
                         let (rect, response) = ui.allocate_exact_size(
                             egui::vec2(tile_width, tile_height),
                             egui::Sense::click_and_drag(),
@@ -257,8 +257,8 @@ impl LuxePixApp {
                         self.attach_item_context_menu(response.clone(), &mut context_command);
 
                         let name_rect = egui::Rect::from_min_size(
-                            egui::pos2(rect.min.x + 8.0, rect.min.y + tile_width + 5.0),
-                            egui::vec2(tile_width - 16.0, 20.0),
+                            egui::pos2(rect.min.x + 8.0, rect.min.y + tile_width + 4.0),
+                            egui::vec2(tile_width - 16.0, 30.0),
                         );
                         if renaming_path.as_ref() == Some(&file.path) {
                             if let Some(rename) = &mut self.renaming {
@@ -278,12 +278,15 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            ui.painter().text(
-                                name_rect.left_center(),
-                                egui::Align2::LEFT_CENTER,
-                                truncate_str(&file.name, 26),
-                                egui::FontId::proportional(12.0),
-                                palette.text_primary,
+                            ui.put(
+                                name_rect,
+                                egui::Label::new(
+                                    egui::RichText::new(&file.name)
+                                        .size(12.0)
+                                        .color(palette.text_primary),
+                                )
+                                .wrap()
+                                .truncate(),
                             );
                         }
                         ui.painter().text(
@@ -343,7 +346,7 @@ impl LuxePixApp {
                 ui.add_space(6.0);
                 for file in &files {
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 38.0),
+                        egui::vec2(ui.available_width(), 42.0),
                         egui::Sense::click_and_drag(),
                     );
                     item_rects.push((file.id.clone(), rect));
@@ -499,7 +502,7 @@ impl LuxePixApp {
             .show(ui, |ui| {
                 for file in &files {
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 36.0),
+                        egui::vec2(ui.available_width(), 40.0),
                         egui::Sense::click_and_drag(),
                     );
                     item_rects.push((file.id.clone(), rect));

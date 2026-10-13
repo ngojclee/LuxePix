@@ -1,25 +1,24 @@
-# LuxePix 1.1.0
+# LuxePix 1.2.0
 
-This release turns LuxePix into a product-focused image explorer with
-professional file operations and local search.
+This release completes the self-update flow for installed copies and gives the
+interface a consistency and spacing pass.
 
 ## Highlights
 
-- Light, Dark, and System themes with a compact explorer layout.
-- Configurable keyboard shortcuts for copy, cut, paste, rename, delete,
-  navigation, search, preview, and settings.
-- Gallery, Grid, Compact, and Details views with stable inline rename.
-- Multi-selection, collision handling, Task Center, and bounded Undo.
-- Fast product-code search with starts-with matching and automatic selection
-  of the first result.
-- Local Find Product by Image using perceptual hashes, with an optional
-  checksummed AI Model Pack bridge.
-- Batch Rename with preview, Duplicate Finder, safe ZIP create/extract, and
-  Folder Size analysis.
-- Configurable 256 MB byte-bounded thumbnail cache with least-recently-used
-  eviction.
-- Verified GitHub updates with a separate portable updater, startup handshake,
-  rollback, and an Inno Setup installer.
+- Installed copies now update end-to-end: LuxePix downloads the verified
+  installer, closes itself, lets LuxePixUpdater silently remove the previous
+  installation, and reruns the full setup wizard into the same folder.
+- Settings, thumbnail cache, product index, and similarity data in AppData are
+  preserved across updates; previously selected setup tasks (desktop icon) are
+  carried over automatically.
+- If an update is cancelled or fails, the existing installation is restarted
+  untouched whenever possible, and the downloaded installer is kept for a
+  manual retry.
+- Settings > Advanced now shows the install folder, data root, config, session
+  state, thumbnail cache, and update staging paths with quick open buttons.
+- The header and first-run screen use the new paper-sketch LuxePix icon, and
+  list rows, toolbars, side panels, and dialogs received a breathing-room
+  spacing pass in both themes.
 
 LuxePix does not upload product images, send telemetry, or write persistent
 diagnostic logs.

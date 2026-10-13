@@ -75,8 +75,8 @@ begin
   begin
     Result :=
       MsgBox(
-        'LuxePix Setup will close and replace the previous installed version. ' +
-        'Your settings, cache, and product index in AppData will be preserved.'#13#10#13#10 +
+        'LuxePix Setup will install the update into the existing folder. ' +
+        'Your settings, cache, and product index in AppData are preserved.'#13#10#13#10 +
         'Continue with the update?',
         mbConfirmation,
         MB_YESNO or MB_DEFBUTTON2

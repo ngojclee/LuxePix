@@ -391,6 +391,11 @@ pub fn startup_handshake_from_args() -> Result<Option<StartupHandshake>, String>
     }
 }
 
+/// Inno Setup uninstall registry key (AppId + `_is1`) recorded by every
+/// installed copy. Keep in sync with `AppId` in `installer/LuxePix.iss`.
+pub const INNO_UNINSTALL_SUBKEY: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{FB281026-7847-4149-A551-8208EC55E64E}_is1";
+
 pub fn launch_verified_package(
     package: &VerifiedPackage,
     storage: &StoragePaths,
@@ -402,7 +407,7 @@ pub fn launch_verified_package(
     )?;
     match package.offer.asset.mode {
         PackageMode::Portable => launch_portable_update(package, storage),
-        PackageMode::Installed => launch_installed_update(package),
+        PackageMode::Installed => launch_installed_update(package, storage),
     }
 }
 
@@ -456,7 +461,10 @@ fn launch_portable_update(package: &VerifiedPackage, storage: &StoragePaths) -> 
     Ok(())
 }
 
-fn launch_installed_update(package: &VerifiedPackage) -> Result<(), String> {
+fn launch_installed_update(
+    package: &VerifiedPackage,
+    storage: &StoragePaths,
+) -> Result<(), String> {
     if package
         .path
         .extension()
@@ -464,11 +472,143 @@ fn launch_installed_update(package: &VerifiedPackage) -> Result<(), String> {
     {
         return Err("Installed update package must be an executable installer.".into());
     }
-    Command::new(&package.path)
-        .arg("/LUXEPIXUPDATE=1")
+    let helper_source = storage.executable_dir.join("LuxePixUpdater.exe");
+    if !helper_source.is_file() {
+        // This copy was not deployed by LuxePix Setup (e.g. a dev build), so
+        // hand the installer straight to the user with its full wizard.
+        Command::new(&package.path)
+            .arg("/LUXEPIXUPDATE=1")
+            .spawn()
+            .map_err(|error| format!("Could not start LuxePix Setup: {error}"))?;
+        return Ok(());
+    }
+    let token = unique_token();
+    let helper_dir = std::env::temp_dir().join(format!("LuxePixUpdater-{token}"));
+    fs::create_dir_all(&helper_dir).map_err(|error| error.to_string())?;
+    let helper_copy = helper_dir.join("LuxePixUpdater.exe");
+    fs::copy(&helper_source, &helper_copy)
+        .map_err(|error| format!("Could not prepare updater helper: {error}"))?;
+
+    let uninstaller = storage.executable_dir.join("unins000.exe");
+    let restart_executable = storage.executable_dir.join("LuxePix.exe");
+    let mut command = Command::new(&helper_copy);
+    command
+        .arg("--installer")
+        .arg(&package.path)
+        .arg("--target-dir")
+        .arg(&storage.executable_dir)
+        .arg("--wait-pid")
+        .arg(std::process::id().to_string())
+        .arg("--restart-executable")
+        .arg(restart_executable);
+    if uninstaller.is_file() {
+        command.arg("--uninstaller").arg(uninstaller);
+    }
+    if let Some(tasks) = inno_selected_tasks() {
+        command.arg("--tasks").arg(tasks);
+    }
+    command
         .spawn()
-        .map_err(|error| format!("Could not start LuxePix Setup: {error}"))?;
+        .map_err(|error| format!("Could not start the LuxePix update helper: {error}"))?;
     Ok(())
+}
+
+/// Best-effort read of the tasks selected during the current installation so
+/// the reinstalled copy keeps the same shortcuts (e.g. the desktop icon).
+#[cfg(windows)]
+fn inno_selected_tasks() -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
+        REG_SZ, REG_VALUE_TYPE,
+    };
+
+    let subkey: Vec<u16> = INNO_UNINSTALL_SUBKEY
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut hkey = HKEY::default();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+    } != ERROR_SUCCESS
+    {
+        return None;
+    }
+    struct KeyGuard(HKEY);
+    impl Drop for KeyGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = RegCloseKey(self.0);
+            }
+        }
+    }
+    let _guard = KeyGuard(hkey);
+
+    let value_name: Vec<u16> = "Inno Setup: Selected Tasks"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut value_type = REG_VALUE_TYPE::default();
+    let mut byte_len = 0u32;
+    if unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            None,
+            Some(&mut byte_len),
+        )
+    } != ERROR_SUCCESS
+        || value_type != REG_SZ
+        || byte_len == 0
+        || byte_len > 4096
+    {
+        return None;
+    }
+    let mut buffer = vec![0u16; (byte_len as usize / 2) + 1];
+    if unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buffer.as_mut_ptr() as *mut u8),
+            Some(&mut byte_len),
+        )
+    } != ERROR_SUCCESS
+    {
+        return None;
+    }
+    let text = String::from_utf16_lossy(&buffer[..byte_len as usize / 2]);
+    let tasks: Vec<&str> = text
+        .trim_matches(char::from(0))
+        .split(',')
+        .map(str::trim)
+        .filter(|task| {
+            !task.is_empty()
+                && task
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+        .collect();
+    if tasks.is_empty() {
+        None
+    } else {
+        Some(tasks.join(","))
+    }
+}
+
+#[cfg(not(windows))]
+fn inno_selected_tasks() -> Option<String> {
+    None
 }
 
 fn check_latest_release(mode: PackageMode) -> Result<CheckResult, String> {
