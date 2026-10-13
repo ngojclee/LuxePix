@@ -278,15 +278,12 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            ui.put(
+                            paint_wrapped_text(
+                                ui,
                                 name_rect,
-                                egui::Label::new(
-                                    egui::RichText::new(&file.name)
-                                        .size(12.0)
-                                        .color(palette.text_primary),
-                                )
-                                .wrap()
-                                .truncate(),
+                                &file.name,
+                                12.0,
+                                palette.text_primary,
                             );
                         }
                         ui.painter().text(

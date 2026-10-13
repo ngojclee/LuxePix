@@ -5193,15 +5193,12 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            ui.put(
+                            paint_wrapped_text(
+                                ui,
                                 name_rect,
-                                egui::Label::new(
-                                    egui::RichText::new(&folder.name)
-                                        .size(13.0)
-                                        .color(palette.text_primary),
-                                )
-                                .wrap()
-                                .truncate(),
+                                &folder.name,
+                                13.0,
+                                palette.text_primary,
                             );
                         }
 
@@ -5516,15 +5513,12 @@ impl LuxePixApp {
                                 }
                             }
                         } else {
-                            ui.put(
+                            paint_wrapped_text(
+                                ui,
                                 name_rect,
-                                egui::Label::new(
-                                    egui::RichText::new(&file.name)
-                                        .size(12.5)
-                                        .color(palette.text_primary),
-                                )
-                                .wrap()
-                                .truncate(),
+                                &file.name,
+                                12.5,
+                                palette.text_primary,
                             );
                         }
 
@@ -5990,6 +5984,27 @@ fn fit_window_size(ctx: &egui::Context, width: f32, height: f32) -> egui::Vec2 {
         width.min((screen.x - 48.0).max(420.0)),
         height.min((screen.y - 120.0).max(320.0)),
     )
+}
+
+/// Paint text wrapped to the rect width, clipped to the rect height. Uses the
+/// painter only — `ui.put` inside a `horizontal_wrapped` layout would advance
+/// the row cursor and skew the tile grid.
+fn paint_wrapped_text(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    text: &str,
+    font_size: f32,
+    color: egui::Color32,
+) {
+    let galley = ui.painter().layout(
+        text.to_owned(),
+        egui::FontId::proportional(font_size),
+        color,
+        rect.width(),
+    );
+    ui.painter()
+        .with_clip_rect(rect)
+        .galley(rect.left_top(), galley, color);
 }
 
 fn paint_brand_icon(
